@@ -1,5 +1,5 @@
 """Tests for utility functions."""
-from src.utils import add, multiply
+from src.utils import add, multiply, subtract
 
 
 def test_add():
@@ -27,3 +27,19 @@ def test_multiply_zero():
 def test_multiply_by_one():
     assert multiply(1, 5) == 5
     assert multiply(7, 1) == 7
+
+
+def test_subtract():
+    assert subtract(5, 3) == 2
+    assert subtract(0, 0) == 0
+    assert subtract(-1, -1) == 0
+
+
+def test_subtract_negative_result():
+    assert subtract(3, 5) == -2
+    assert subtract(0, 5) == -5
+
+
+def test_subtract_with_negatives():
+    assert subtract(-1, -3) == 2
+    assert subtract(-5, 3) == -8
