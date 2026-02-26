@@ -141,6 +141,7 @@ class Worker:
             str(self.task.max_turns),
             "--allowedTools",
             "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
+            "--dangerously-skip-permissions",
         ]
         logger.info(
             "Running claude for task %s (timeout=%ds)", self.task.id, self.timeout
@@ -304,22 +305,17 @@ class Worker:
                 logger.warning("Failed to remove worktree %s", self.worktree_path)
 
     def _build_prompt(self) -> str:
-        rules = "\n".join(
-            [
-                "- Write clean, well-structured code",
-                "- Use type hints on all function signatures",
-                "- Run pytest to verify your changes pass",
-                "- Run ruff to check for lint errors and fix any issues",
-                f"- Commit your changes with message: [agent] feat: {self.task.title}",
-                "- Do NOT push to the remote",
-                "- Do NOT modify any files under agent-shop/ or .github/",
-            ]
-        )
+        desc = self.task.description
+        title = self.task.title
         return (
-            f"Task: {self.task.title}\n\n"
-            f"Description:\n{self.task.description}\n\n"
-            f"Files likely involved: {', '.join(self.task.files_touched) if self.task.files_touched else 'determine as needed'}\n\n"
-            f"Rules:\n{rules}"
+            f"{desc}\n\n"
+            f"After making your changes:\n"
+            f"1. Run pytest to make sure all tests pass\n"
+            f"2. Run ruff check . and fix any issues\n"
+            f"3. Stage all changes with git add -A\n"
+            f"4. Commit with message: [agent] feat: {title}\n"
+            f"5. Do NOT push\n"
+            f"6. Do NOT modify files in agent-shop/ or .github/"
         )
 
     def _build_pr_body(self, result: WorkerResult) -> str:

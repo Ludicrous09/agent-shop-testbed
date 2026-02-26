@@ -1,0 +1,60 @@
+tasks:
+  - id: task-001
+    title: Add divide function
+    description: |
+      Add a `divide(a: int, b: int) -> float` function to src/utils.py.
+      It must raise ZeroDivisionError when b is 0.
+      Add comprehensive tests in tests/test_utils.py covering:
+        - Normal division (positive, negative, mixed signs)
+        - Division resulting in a float
+        - ZeroDivisionError when dividing by zero
+    files_touched:
+      - src/utils.py
+      - tests/test_utils.py
+    depends_on: []
+    priority: 1
+    max_turns: 50
+    model: sonnet
+
+  - id: task-002
+    title: Add power function
+    description: |
+      Add a `power(base: int, exponent: int) -> int` function to src/utils.py.
+      Add comprehensive tests in tests/test_utils.py covering:
+        - Positive exponents
+        - Exponent of 0 (should return 1)
+        - Negative base with even/odd exponents
+    files_touched:
+      - src/utils.py
+      - tests/test_utils.py
+    depends_on:
+      - task-001
+    priority: 2
+    max_turns: 50
+    model: sonnet
+
+  - id: task-003
+    title: Add Calculator class
+    description: |
+      Create a Calculator class in src/calculator.py that wraps all utility
+      functions (add, subtract, multiply, divide, power) from src/utils.py.
+
+      The class should:
+        - Import and delegate to the functions in src/utils.py
+        - Have methods: add, subtract, multiply, divide, power
+        - Each method takes two arguments and returns the result
+        - Include a `history` list attribute that records each operation as
+          a dict with keys: operation, args, result
+
+      Add comprehensive tests in tests/test_calculator.py covering:
+        - Each Calculator method returns correct results
+        - History is recorded correctly
+        - ZeroDivisionError propagates from divide(x, 0)
+    files_touched:
+      - src/calculator.py
+      - tests/test_calculator.py
+    depends_on:
+      - task-002
+    priority: 3
+    max_turns: 50
+    model: sonnet
