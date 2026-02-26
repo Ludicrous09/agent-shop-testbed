@@ -63,9 +63,13 @@ class Worker:
         self.task = task
         self.worker_id = worker_id
         self.timeout = timeout
-        self.log_dir = Path(log_dir) if log_dir else self.repo_path / "agent-shop" / "logs"
+        self.log_dir = (
+            Path(log_dir) if log_dir else self.repo_path / "agent-shop" / "logs"
+        )
         self.branch = f"agent/{task.id}-{self._slugify(task.title)}"
-        self.worktree_path = self.WORKTREE_BASE / f"{task.id}-{self._slugify(task.title)}"
+        self.worktree_path = (
+            self.WORKTREE_BASE / f"{task.id}-{self._slugify(task.title)}"
+        )
         self._log_lines: list[str] = []
 
     def run(self) -> WorkerResult:
@@ -97,7 +101,9 @@ class Worker:
         return result
 
     def _setup_worktree(self) -> None:
-        logger.info("Setting up worktree for task %s at %s", self.task.id, self.worktree_path)
+        logger.info(
+            "Setting up worktree for task %s at %s", self.task.id, self.worktree_path
+        )
         self.WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
 
         # Clean up stale worktrees
@@ -116,21 +122,29 @@ class Worker:
             pass  # Branch doesn't exist, that's fine
 
         # Create new worktree with a new branch
-        self._run_git(["worktree", "add", "-b", self.branch, str(self.worktree_path), "main"])
+        self._run_git(
+            ["worktree", "add", "-b", self.branch, str(self.worktree_path), "main"]
+        )
         logger.info("Created worktree on branch %s", self.branch)
 
     def _run_claude(self) -> str:
         prompt = self._build_prompt()
         cmd = [
             "claude",
-            "-p", prompt,
-            "--output-format", "json",
-            "--model", self.task.model,
-            "--max-turns", str(self.task.max_turns),
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--model",
+            self.task.model,
+            "--max-turns",
+            str(self.task.max_turns),
             "--allowedTools",
             "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
         ]
-        logger.info("Running claude for task %s (timeout=%ds)", self.task.id, self.timeout)
+        logger.info(
+            "Running claude for task %s (timeout=%ds)", self.task.id, self.timeout
+        )
         self._log(f"$ {' '.join(cmd)}")
 
         try:
@@ -146,7 +160,9 @@ class Worker:
 
         if proc.returncode != 0:
             self._log(f"claude stderr: {proc.stderr}")
-            raise WorkerError(f"Claude exited with code {proc.returncode}: {proc.stderr[:500]}")
+            raise WorkerError(
+                f"Claude exited with code {proc.returncode}: {proc.stderr[:500]}"
+            )
 
         output = proc.stdout
         self._log(f"claude output length: {len(output)} chars")
@@ -159,7 +175,9 @@ class Worker:
             logger.info("Task %s - cost: $%s, turns: %s", self.task.id, cost, turns)
             self._log(f"cost: ${cost}, turns: {turns}")
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Could not parse claude JSON output for task %s", self.task.id)
+            logger.warning(
+                "Could not parse claude JSON output for task %s", self.task.id
+            )
 
         return output
 
@@ -172,10 +190,17 @@ class Worker:
             text=True,
         )
         if status.stdout.strip():
-            logger.warning("Found uncommitted changes, auto-committing for task %s", self.task.id)
+            logger.warning(
+                "Found uncommitted changes, auto-committing for task %s", self.task.id
+            )
             subprocess.run(["git", "add", "-A"], cwd=self.worktree_path, check=True)
             subprocess.run(
-                ["git", "commit", "-m", f"[agent] chore: auto-commit remaining changes for {self.task.id}"],
+                [
+                    "git",
+                    "commit",
+                    "-m",
+                    f"[agent] chore: auto-commit remaining changes for {self.task.id}",
+                ],
                 cwd=self.worktree_path,
                 capture_output=True,
                 text=True,
@@ -201,7 +226,12 @@ class Worker:
             text=True,
         )
         files_changed = [f for f in diff_result.stdout.strip().splitlines() if f]
-        logger.info("Task %s changed %d files: %s", self.task.id, len(files_changed), files_changed)
+        logger.info(
+            "Task %s changed %d files: %s",
+            self.task.id,
+            len(files_changed),
+            files_changed,
+        )
         return files_changed
 
     def _push(self) -> None:
@@ -237,11 +267,17 @@ class Worker:
 
     def _try_create_pr(self, title: str, body: str, label: str | None) -> str | None:
         cmd = [
-            "gh", "pr", "create",
-            "--title", title,
-            "--body", body,
-            "--base", "main",
-            "--head", self.branch,
+            "gh",
+            "pr",
+            "create",
+            "--title",
+            title,
+            "--body",
+            body,
+            "--base",
+            "main",
+            "--head",
+            self.branch,
         ]
         if label:
             cmd.extend(["--label", label])
@@ -261,20 +297,24 @@ class Worker:
         if self.worktree_path.exists():
             logger.info("Cleaning up worktree at %s", self.worktree_path)
             try:
-                self._run_git(["worktree", "remove", "--force", str(self.worktree_path)])
+                self._run_git(
+                    ["worktree", "remove", "--force", str(self.worktree_path)]
+                )
             except WorkerError:
                 logger.warning("Failed to remove worktree %s", self.worktree_path)
 
     def _build_prompt(self) -> str:
-        rules = "\n".join([
-            "- Write clean, well-structured code",
-            "- Use type hints on all function signatures",
-            "- Run pytest to verify your changes pass",
-            "- Run ruff to check for lint errors and fix any issues",
-            f'- Commit your changes with message: [agent] feat: {self.task.title}',
-            "- Do NOT push to the remote",
-            "- Do NOT modify any files under agent-shop/ or .github/",
-        ])
+        rules = "\n".join(
+            [
+                "- Write clean, well-structured code",
+                "- Use type hints on all function signatures",
+                "- Run pytest to verify your changes pass",
+                "- Run ruff to check for lint errors and fix any issues",
+                f"- Commit your changes with message: [agent] feat: {self.task.title}",
+                "- Do NOT push to the remote",
+                "- Do NOT modify any files under agent-shop/ or .github/",
+            ]
+        )
         return (
             f"Task: {self.task.title}\n\n"
             f"Description:\n{self.task.description}\n\n"
@@ -283,7 +323,11 @@ class Worker:
         )
 
     def _build_pr_body(self, result: WorkerResult) -> str:
-        files_section = "\n".join(f"- `{f}`" for f in result.files_changed) if result.files_changed else "- None detected"
+        files_section = (
+            "\n".join(f"- `{f}`" for f in result.files_changed)
+            if result.files_changed
+            else "- None detected"
+        )
         elapsed = f"{result.elapsed_seconds:.1f}s" if result.finished_at else "unknown"
         return (
             f"## Task\n\n"
@@ -312,8 +356,7 @@ class Worker:
             f"elapsed: {result.elapsed_seconds:.1f}s\n"
             f"error: {result.error}\n"
             f"files_changed: {result.files_changed}\n"
-            f"---\n"
-            + "\n".join(self._log_lines)
+            f"---\n" + "\n".join(self._log_lines)
         )
         log_path.write_text(content)
         logger.info("Log saved to %s", log_path)
@@ -342,7 +385,9 @@ class Worker:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    )
 
     task = Task(
         id="test-001",
