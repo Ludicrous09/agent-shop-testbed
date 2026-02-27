@@ -3,9 +3,10 @@
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -222,12 +223,14 @@ class FixAgent:
         ]
         logger.info("Running claude in worktree (timeout=%ds)", self.timeout)
         try:
+            env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
             proc = subprocess.run(
                 cmd,
                 cwd=self._worktree_path,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise FixError(f"Claude timed out after {self.timeout}s") from exc

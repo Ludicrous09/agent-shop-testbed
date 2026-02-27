@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -228,12 +229,14 @@ class ReviewAgent:
         ]
         logger.info("Running claude (timeout=%ds)", self.timeout)
         try:
+            env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
             proc = subprocess.run(
                 cmd,
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             raise ReviewError(f"Claude timed out after {self.timeout}s") from e
@@ -297,13 +300,6 @@ class ReviewAgent:
                 }
             )
 
-        payload = {
-            "body": result.summary,
-            "event": event,
-            "comments": comments,
-        }
-        payload_json = json.dumps(payload)
-
         logger.info(
             "Posting review to PR #%d (event=%s, inline_comments=%d)",
             self.pr_number,
@@ -311,7 +307,6 @@ class ReviewAgent:
             len(comments),
         )
 
-        endpoint = f"repos/{self._owner}/{self._repo}/pulls/{self.pr_number}/reviews"
         # Build the full review body with inline comments included as text
         comment_text = ""
         if result.comments:

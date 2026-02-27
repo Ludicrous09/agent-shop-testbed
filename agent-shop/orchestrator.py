@@ -6,7 +6,6 @@ import json
 import logging
 import subprocess
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -33,10 +32,12 @@ console = Console()
 class OrchestratorState:
     """Mutable state bag for the orchestration loop."""
 
-    def __init__(self, tasks, repo_path: Path, timeout: int):
+    def __init__(self, tasks, repo_path: Path, timeout: int, log_dir: Path, max_retries: int = 2):
         self.tasks = tasks
         self.repo_path = repo_path
         self.timeout = timeout
+        self.log_dir = log_dir
+        self.max_retries = max_retries
 
         self.completed_ids: set[str] = set()
         self.failed_ids: set[str] = set()
@@ -44,6 +45,7 @@ class OrchestratorState:
         self.review_futures: dict[str, asyncio.Future] = {}  # task_id -> review/fix/merge future
         self.active_files: set[str] = set()
         self.results: list[WorkerResult] = []
+        self.retry_counts: dict[str, int] = {}  # task_id -> number of retries attempted
 
     # Convenience counts
     @property
@@ -79,9 +81,16 @@ class OrchestratorState:
                 "failed": len(self.failed_ids),
             },
             "workers": {
-                **{tid: {"status": "running"} for tid in self.active_workers},
-                **{tid: {"status": "reviewing"} for tid in self.review_futures},
+                **{
+                    tid: {"status": "running", "retries": self.retry_counts.get(tid, 0)}
+                    for tid in self.active_workers
+                },
+                **{
+                    tid: {"status": "reviewing", "retries": self.retry_counts.get(tid, 0)}
+                    for tid in self.review_futures
+                },
             },
+            "retries": dict(self.retry_counts),
             "prs": [
                 {"task_id": r.task_id, "pr_url": r.pr_url, "pr_number": r.pr_number}
                 for r in self.results
@@ -105,7 +114,6 @@ def build_table(state: OrchestratorState) -> Table:
     table.add_column("Priority", justify="center")
     table.add_column("Status", justify="center")
 
-    task_map = {t.id: t for t in state.tasks}
     for task in state.tasks:
         if task.id in state.completed_ids:
             status = "[green]completed[/green]"
@@ -224,11 +232,41 @@ async def run_review_fix_merge(
 # Core loop
 # ---------------------------------------------------------------------------
 
+def _cleanup_failed_branch(repo_path: Path, branch: str) -> None:
+    """Delete a failed branch from remote and locally."""
+    remote_result = subprocess.run(
+        ["git", "push", "origin", "--delete", branch],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if remote_result.returncode != 0:
+        log.warning(
+            "Failed to delete remote branch %s: %s",
+            branch,
+            remote_result.stderr[:300],
+        )
+
+    local_result = subprocess.run(
+        ["git", "branch", "-D", branch],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if local_result.returncode != 0:
+        log.warning(
+            "Failed to delete local branch %s: %s",
+            branch,
+            local_result.stderr[:300],
+        )
+
+
 async def run_worker(
     executor: ThreadPoolExecutor,
     state: OrchestratorState,
     task,
     worker_counter: int,
+    branch_suffix: str = "",
 ) -> WorkerResult:
     """Run a single Worker.run() in a thread via run_in_executor."""
     worker = Worker(
@@ -236,6 +274,8 @@ async def run_worker(
         task=task,
         worker_id=f"worker-{worker_counter}",
         timeout=state.timeout,
+        branch_suffix=branch_suffix,
+        log_dir=state.log_dir,
     )
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, worker.run)
@@ -248,12 +288,17 @@ async def orchestrate(
     timeout: int,
     source: str = "plan",
     label: str = "agent-ready",
+    max_retries: int = 2,
+    log_dir: str = "./logs",
 ) -> None:
     repo = Path(repo_path).resolve()
-    status_path = repo / "agent-shop" / "status.json"
+    # status.json stays local to the orchestrator's working directory,
+    # not inside the (potentially external) target repo.
+    status_path = Path("status.json")
+    log_dir_path = Path(log_dir)
 
     if source == "issues":
-        log.info("Fetching tasks from GitHub Issues (label=%s)", label)
+        log.info("Fetching tasks from GitHub Issues (label=%s, repo=%s)", label, repo)
         issue_source = IssueSource(repo_path=repo, label=label)
         tasks = issue_source.fetch_tasks()
     else:
@@ -262,7 +307,7 @@ async def orchestrate(
         issue_source = None
     log.info("Loaded %d tasks", len(tasks))
 
-    state = OrchestratorState(tasks, repo, timeout)
+    state = OrchestratorState(tasks, repo, timeout, log_dir_path, max_retries=max_retries)
     worker_counter = 0
     executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -297,11 +342,64 @@ async def orchestrate(
                         state.completed_ids.add(task_id)
                         log.info("Task %s completed (no PR)", task_id)
                     else:
-                        state.failed_ids.add(task_id)
-                        log.error("Task %s failed: %s", task_id, result.error)
+                        retry_count = state.retry_counts.get(task_id, 0)
+                        if retry_count < state.max_retries:
+                            retry_n = retry_count + 1
+                            state.retry_counts[task_id] = retry_n
+                            log.warning(
+                                "Task %s failed (attempt %d/%d): %s — retrying",
+                                task_id,
+                                retry_n,
+                                state.max_retries + 1,
+                                result.error,
+                            )
+                            _cleanup_failed_branch(repo, result.branch)
+                            branch_suffix = f"-retry-{retry_n}"
+                            worker_counter += 1
+                            log.info(
+                                "Spawning retry worker for task %s (suffix=%s)",
+                                task_id,
+                                branch_suffix,
+                            )
+                            state.active_files.update(task_obj.files_touched)
+                            retry_future = asyncio.ensure_future(
+                                run_worker(
+                                    executor, state, task_obj, worker_counter, branch_suffix
+                                )
+                            )
+                            state.active_workers[task_id] = retry_future
+                        else:
+                            state.failed_ids.add(task_id)
+                            log.error(
+                                "Task %s failed after %d retries: %s",
+                                task_id,
+                                state.max_retries,
+                                result.error,
+                            )
                 except Exception as exc:
-                    state.failed_ids.add(task_id)
-                    log.error("Task %s raised exception: %s", task_id, exc)
+                    retry_count = state.retry_counts.get(task_id, 0)
+                    if retry_count < state.max_retries:
+                        retry_n = retry_count + 1
+                        state.retry_counts[task_id] = retry_n
+                        log.warning(
+                            "Task %s raised exception (attempt %d/%d): %s — retrying",
+                            task_id,
+                            retry_n,
+                            state.max_retries + 1,
+                            exc,
+                        )
+                        branch_suffix = f"-retry-{retry_n}"
+                        worker_counter += 1
+                        state.active_files.update(task_obj.files_touched)
+                        retry_future = asyncio.ensure_future(
+                            run_worker(
+                                executor, state, task_obj, worker_counter, branch_suffix
+                            )
+                        )
+                        state.active_workers[task_id] = retry_future
+                    else:
+                        state.failed_ids.add(task_id)
+                        log.error("Task %s raised exception: %s", task_id, exc)
 
                 write_status(state, status_path)
                 live.update(build_table(state))
@@ -427,6 +525,17 @@ def main() -> None:
         default=600,
         help="Per-task timeout in seconds (default: 600)",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Max retry attempts per failed task (default: 2)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="./logs",
+        help="Directory for worker log files and status.json (default: ./logs)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -443,6 +552,8 @@ def main() -> None:
             timeout=args.timeout,
             source=args.source,
             label=args.label,
+            max_retries=args.max_retries,
+            log_dir=args.log_dir,
         ))
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted![/bold red] Cancelling active workers…")

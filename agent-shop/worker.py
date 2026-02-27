@@ -2,9 +2,9 @@
 
 import json
 import logging
+import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,17 +58,19 @@ class Worker:
         worker_id: str,
         timeout: int = 600,
         log_dir: str | Path | None = None,
+        branch_suffix: str = "",
     ):
         self.repo_path = Path(repo_path).resolve()
         self.task = task
         self.worker_id = worker_id
         self.timeout = timeout
         self.log_dir = (
-            Path(log_dir) if log_dir else self.repo_path / "agent-shop" / "logs"
+            Path(log_dir) if log_dir else self.repo_path / "logs"
         )
-        self.branch = f"agent/{task.id}-{self._slugify(task.title)}"
+        slug = self._slugify(task.title)
+        self.branch = f"agent/{task.id}-{slug}{branch_suffix}"
         self.worktree_path = (
-            self.WORKTREE_BASE / f"{task.id}-{self._slugify(task.title)}"
+            self.WORKTREE_BASE / f"{task.id}-{slug}{branch_suffix}"
         )
         self._log_lines: list[str] = []
 
@@ -160,12 +162,14 @@ class Worker:
         self._log(f"$ {' '.join(cmd)}")
 
         try:
+            env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
             proc = subprocess.run(
                 cmd,
                 cwd=self.worktree_path,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             raise WorkerError(f"Claude timed out after {self.timeout}s") from e
@@ -326,7 +330,7 @@ class Worker:
             f"3. Stage all changes with git add -A\n"
             f"4. Commit with message: [agent] feat: {title}\n"
             f"5. Do NOT push\n"
-            f"6. Do NOT modify files in agent-shop/ or .github/"
+            f"6. Do NOT modify files in .github/"
         )
 
     def _build_pr_body(self, result: WorkerResult) -> str:
