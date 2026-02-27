@@ -1,22 +1,16 @@
 tasks:
-  - id: task-006
-    title: Add Calculator class
+  - id: task-007
+    title: Add string utility functions
     description: |
-      Create a Calculator class in src/calculator.py that wraps all utility
-      functions (add, subtract, multiply, divide, power) from src/utils.py.
-      The class should:
-        - Import and delegate to the functions in src/utils.py
-        - Have methods: add, subtract, multiply, divide, power
-        - Each method takes two arguments and returns the result
-        - Include a `history` list attribute that records each operation as
-          a dict with keys: operation, args, result
-      Add comprehensive tests in tests/test_calculator.py covering:
-        - Each Calculator method returns correct results
-        - History is recorded correctly
-        - ZeroDivisionError propagates from divide(x, 0)
+      Create a new module src/string_utils.py with these functions:
+        - reverse(s: str) -> str: reverse a string
+        - is_palindrome(s: str) -> bool: check if string is a palindrome (case-insensitive, ignore spaces)
+        - word_count(s: str) -> int: count words in a string
+        - truncate(s: str, max_length: int, suffix: str = '...') -> str: truncate string to max_length, adding suffix if truncated
+      Add comprehensive tests in tests/test_string_utils.py
     files_touched:
-      - src/calculator.py
-      - tests/test_calculator.py
+      - src/string_utils.py
+      - tests/test_string_utils.py
     depends_on: []
     priority: 1
     max_turns: 40

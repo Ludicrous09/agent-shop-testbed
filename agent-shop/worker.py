@@ -106,6 +106,17 @@ class Worker:
         )
         self.WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
 
+        # Pull latest main so the new worktree branches from up-to-date code
+        logger.info("Pulling latest main before creating worktree")
+        pull = subprocess.run(
+            ["git", "pull"],
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if pull.returncode != 0:
+            logger.warning("git pull on main failed: %s", pull.stderr[:300])
+
         # Clean up stale worktrees
         self._run_git(["worktree", "prune"])
 
