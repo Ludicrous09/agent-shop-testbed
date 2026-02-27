@@ -6,16 +6,20 @@ import json
 import logging
 import subprocess
 import sys
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from task_manager import load_tasks, get_ready_tasks
-from worker import Worker, WorkerResult
+from worker import Task, Worker, WorkerResult
 from reviewer import ReviewAgent
 from fixer import FixAgent
 from issue_source import IssueSource
+from decomposer import DecomposerAgent, is_vague
+from conflict_resolver import ConflictResolver
 
 from rich.console import Console
 from rich.live import Live
@@ -46,6 +50,10 @@ class OrchestratorState:
         self.active_files: set[str] = set()
         self.results: list[WorkerResult] = []
         self.retry_counts: dict[str, int] = {}  # task_id -> number of retries attempted
+        self.task_start_times: dict[str, datetime] = {}  # task_id -> when worker was spawned
+        self.task_durations: dict[str, float] = {}  # task_id -> elapsed seconds (completed/failed)
+        self.task_costs: dict[str, float] = {}  # task_id -> cost_usd from claude output
+        self.task_prompts: dict[str, int] = {}  # task_id -> num_turns from claude output
 
     # Convenience counts
     @property
@@ -71,6 +79,20 @@ class OrchestratorState:
         return len(self.review_futures)
 
     def status_dict(self) -> dict:
+        now = datetime.now(timezone.utc)
+
+        def _elapsed(tid: str) -> float | None:
+            if tid in self.task_start_times:
+                return (now - self.task_start_times[tid]).total_seconds()
+            return None
+
+        total_cost = sum(self.task_costs.values())
+        total_prompts = sum(self.task_prompts.values())
+        total_elapsed = sum(self.task_durations.values())
+        for tid, start in self.task_start_times.items():
+            if tid not in self.task_durations:
+                total_elapsed += (now - start).total_seconds()
+
         return {
             "tasks": {
                 "total": self.total,
@@ -82,13 +104,35 @@ class OrchestratorState:
             },
             "workers": {
                 **{
-                    tid: {"status": "running", "retries": self.retry_counts.get(tid, 0)}
+                    tid: {
+                        "status": "running",
+                        "retries": self.retry_counts.get(tid, 0),
+                        "elapsed_seconds": _elapsed(tid),
+                    }
                     for tid in self.active_workers
                 },
                 **{
-                    tid: {"status": "reviewing", "retries": self.retry_counts.get(tid, 0)}
+                    tid: {
+                        "status": "reviewing",
+                        "retries": self.retry_counts.get(tid, 0),
+                        "elapsed_seconds": _elapsed(tid),
+                    }
                     for tid in self.review_futures
                 },
+            },
+            "task_timing": {
+                tid: {
+                    "elapsed_seconds": self.task_durations.get(tid),
+                    "cost_usd": self.task_costs.get(tid),
+                    "num_turns": self.task_prompts.get(tid),
+                }
+                for tid in (self.completed_ids | self.failed_ids)
+                if tid in self.task_durations or tid in self.task_costs
+            },
+            "summary": {
+                "total_elapsed_seconds": total_elapsed,
+                "total_cost_usd": total_cost,
+                "total_prompts": total_prompts,
             },
             "retries": dict(self.retry_counts),
             "prs": [
@@ -107,12 +151,28 @@ def write_status(state: OrchestratorState, status_path: Path) -> None:
 # Rich display
 # ---------------------------------------------------------------------------
 
+def _format_duration(seconds: float) -> str:
+    """Format elapsed seconds as 'Xm YYs' or 'Xs'."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins}m {secs:02d}s"
+
+
 def build_table(state: OrchestratorState) -> Table:
+    now = datetime.now(timezone.utc)
+
     table = Table(title="Orchestrator Status", expand=True)
     table.add_column("Task ID", style="cyan", no_wrap=True)
     table.add_column("Title", style="white")
     table.add_column("Priority", justify="center")
     table.add_column("Status", justify="center")
+    table.add_column("Duration", justify="right")
+    table.add_column("Cost", justify="right")
+
+    total_cost = 0.0
+    total_prompts = 0
 
     for task in state.tasks:
         if task.id in state.completed_ids:
@@ -126,13 +186,46 @@ def build_table(state: OrchestratorState) -> Table:
         else:
             status = "[dim]queued[/dim]"
 
-        table.add_row(task.id, task.title, str(task.priority), status)
+        # Duration: live for running tasks, fixed for completed/failed
+        if task.id in state.task_durations:
+            duration_str = _format_duration(state.task_durations[task.id])
+        elif task.id in state.task_start_times:
+            elapsed = (now - state.task_start_times[task.id]).total_seconds()
+            duration_str = f"[yellow]{_format_duration(elapsed)}[/yellow]"
+        else:
+            duration_str = ""
+
+        # Cost
+        cost = state.task_costs.get(task.id)
+        if cost is not None:
+            cost_str = f"${cost:.4f}"
+            total_cost += cost
+        else:
+            cost_str = ""
+
+        prompts = state.task_prompts.get(task.id)
+        if prompts is not None:
+            total_prompts += prompts
+
+        table.add_row(task.id, task.title, str(task.priority), status, duration_str, cost_str)
+
+    # Compute total elapsed including running tasks
+    total_elapsed = sum(state.task_durations.values())
+    for tid, start in state.task_start_times.items():
+        if tid not in state.task_durations:
+            total_elapsed += (now - start).total_seconds()
+
+    cost_summary = f"${total_cost:.4f}" if total_cost > 0 else "N/A"
+    prompts_summary = str(total_prompts) if total_prompts > 0 else "N/A"
 
     table.caption = (
         f"Total: {state.total}  "
         f"Active: {state.active}  "
         f"Completed: {len(state.completed_ids)}  "
-        f"Failed: {len(state.failed_ids)}"
+        f"Failed: {len(state.failed_ids)}  "
+        f"| Elapsed: {_format_duration(total_elapsed)}  "
+        f"Cost: {cost_summary}  "
+        f"Prompts: {prompts_summary}"
     )
     return table
 
@@ -167,12 +260,57 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> bool:
                 text=True,
             )
             if proc.returncode != 0:
-                log.error(
-                    "gh pr merge failed for PR #%d (code %d): %s",
-                    pr,
-                    proc.returncode,
-                    proc.stderr[:500],
+                # Check if the failure is due to merge conflicts
+                combined = (proc.stderr + proc.stdout).lower()
+                is_conflict = any(
+                    kw in combined for kw in ("conflict", "not mergeable")
                 )
+                if is_conflict:
+                    log.info(
+                        "PR #%d merge failed due to conflicts — attempting auto-resolution",
+                        pr,
+                    )
+                    resolver = ConflictResolver(repo_path=repo_path, pr_number=pr)
+                    conflict_result = resolver.resolve()
+                    if conflict_result.success:
+                        log.info(
+                            "Conflicts resolved in PR #%d (%d files) — retrying merge",
+                            pr,
+                            len(conflict_result.resolved_files),
+                        )
+                        retry_proc = subprocess.run(
+                            ["gh", "pr", "merge", str(pr), "--squash", "--delete-branch"],
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if retry_proc.returncode == 0:
+                            log.info("PR #%d merged after conflict resolution", pr)
+                            subprocess.run(
+                                ["git", "pull"],
+                                cwd=repo_path,
+                                capture_output=True,
+                                text=True,
+                            )
+                            return True
+                        log.error(
+                            "gh pr merge failed again after conflict resolution for PR #%d: %s",
+                            pr,
+                            retry_proc.stderr[:500],
+                        )
+                    else:
+                        log.error(
+                            "Conflict resolution failed for PR #%d: %s",
+                            pr,
+                            conflict_result.error,
+                        )
+                else:
+                    log.error(
+                        "gh pr merge failed for PR #%d (code %d): %s",
+                        pr,
+                        proc.returncode,
+                        proc.stderr[:500],
+                    )
                 return False
 
             log.info("PR #%d merged — pulling latest main", pr)
@@ -229,6 +367,99 @@ async def run_review_fix_merge(
 
 
 # ---------------------------------------------------------------------------
+# Dry-run plan printer
+# ---------------------------------------------------------------------------
+
+
+def dry_run_plan(tasks: list[Task], max_workers: int) -> None:
+    """Print the execution plan without spawning any workers."""
+    console.rule("[bold cyan]Dry Run — Execution Plan")
+    console.print(f"\n[bold]Tasks loaded:[/bold] {len(tasks)}")
+
+    # Simulate execution waves to show parallelism and dependency ordering
+    completed: set[str] = set()
+    remaining = list(tasks)
+    waves: list[list[Task]] = []
+
+    while remaining:
+        # Find tasks whose dependencies are all satisfied
+        deps_ready = [
+            t for t in remaining if all(dep in completed for dep in t.depends_on)
+        ]
+        if not deps_ready:
+            # Circular or unresolvable dependency — break to avoid infinite loop
+            unscheduled = [t.id for t in remaining]
+            console.print(
+                f"[bold red]Warning: {len(unscheduled)} task(s) could not be scheduled "
+                f"(circular or missing dependency): {', '.join(unscheduled)}[/bold red]"
+            )
+            break
+
+        # Within this wave, pick tasks that don't conflict on files
+        wave_tasks: list[Task] = []
+        wave_files: set[str] = set()
+        for task in sorted(deps_ready, key=lambda t: t.priority):
+            if not (wave_files & set(task.files_touched)):
+                wave_tasks.append(task)
+                wave_files.update(task.files_touched)
+
+        if not wave_tasks:
+            break
+
+        waves.append(wave_tasks)
+        for t in wave_tasks:
+            completed.add(t.id)
+            remaining.remove(t)
+
+    # Print waves
+    console.print()
+    for i, wave_tasks in enumerate(waves):
+        parallel = min(len(wave_tasks), max_workers)
+        console.print(
+            f"[bold]Wave {i + 1}[/bold] "
+            f"({len(wave_tasks)} task(s), up to {parallel} running in parallel):"
+        )
+        for task in wave_tasks:
+            deps_str = (
+                f" [dim][depends on: {', '.join(task.depends_on)}][/dim]"
+                if task.depends_on
+                else ""
+            )
+            files_str = (
+                f" [dim][files: {', '.join(task.files_touched)}][/dim]"
+                if task.files_touched
+                else ""
+            )
+            console.print(f"  • [cyan]{task.id}[/cyan]: {task.title}{deps_str}{files_str}")
+
+    # File conflict groups — tasks sharing files that must run sequentially
+    file_to_tasks: dict[str, list[str]] = defaultdict(list)
+    for task in tasks:
+        for f in task.files_touched:
+            file_to_tasks[f].append(task.id)
+
+    conflict_files = {f: tids for f, tids in file_to_tasks.items() if len(tids) > 1}
+
+    console.print()
+    if conflict_files:
+        console.print("[bold yellow]File Conflict Groups (must run sequentially):[/bold yellow]")
+        for f, tids in conflict_files.items():
+            console.print(f"  [yellow]{f}[/yellow]: {', '.join(tids)}")
+    else:
+        console.print("[dim]No file conflicts detected.[/dim]")
+
+    # Estimated prompt usage
+    estimated_prompts = len(tasks) * 5
+    console.print()
+    console.print(
+        f"[bold]Estimated prompt usage:[/bold] "
+        f"{len(tasks)} tasks × ~5 prompts/task = ~{estimated_prompts} prompts"
+    )
+    console.print(f"[bold]Execution waves:[/bold] {len(waves)}")
+    console.rule("[bold cyan]End of Dry Run")
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -281,6 +512,57 @@ async def run_worker(
     return await loop.run_in_executor(executor, worker.run)
 
 
+def _run_decomposer_pass(repo: Path, label: str) -> None:
+    """Fetch agent-ready issues, decompose any that are vague, then return.
+
+    Vague issues are those whose body is shorter than 100 characters or that
+    have no ``Files:`` section.  The decomposer creates sub-issues and
+    relabels the original as ``agent-decomposed``.
+    """
+    result = subprocess.run(
+        [
+            "gh", "issue", "list",
+            "--label", label,
+            "--limit", "9999",
+            "--state", "open",
+            "--json", "number,title,body",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.error("Failed to list issues for decomposition: %s", result.stderr[:300])
+        return
+
+    issues = json.loads(result.stdout)
+    vague_issues = [iss for iss in issues if is_vague(iss.get("body") or "")]
+
+    if not vague_issues:
+        log.info("No vague issues found — skipping decomposition pass")
+        return
+
+    log.info(
+        "Found %d vague issue(s) to decompose: %s",
+        len(vague_issues),
+        [iss["number"] for iss in vague_issues],
+    )
+
+    for iss in vague_issues:
+        log.info("Decomposing issue #%d: %s", iss["number"], iss["title"])
+        try:
+            agent = DecomposerAgent(issue_number=iss["number"], repo_path=repo)
+            decomposed = agent.decompose()
+            log.info(
+                "Issue #%d decomposed into %d sub-issues: %s",
+                decomposed.parent_issue_number,
+                len(decomposed.sub_issue_numbers),
+                decomposed.sub_issue_numbers,
+            )
+        except Exception as exc:
+            log.error("Failed to decompose issue #%d: %s", iss["number"], exc)
+
+
 async def orchestrate(
     plan_path: str,
     max_workers: int,
@@ -290,12 +572,24 @@ async def orchestrate(
     label: str = "agent-ready",
     max_retries: int = 2,
     log_dir: str = "./logs",
+    dry_run: bool = False,
+    decompose: bool = False,
 ) -> None:
     repo = Path(repo_path).resolve()
     # status.json stays local to the orchestrator's working directory,
     # not inside the (potentially external) target repo.
     status_path = Path("status.json")
     log_dir_path = Path(log_dir)
+
+    if decompose and source != "issues":
+        log.warning(
+            "--decompose has no effect when --source is not 'issues' (got %r); ignoring",
+            source,
+        )
+    if decompose and source == "issues":
+        log.info("Running decomposer pass before fetching tasks (label=%s, repo=%s)", label, repo)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _run_decomposer_pass, repo, label)
 
     if source == "issues":
         log.info("Fetching tasks from GitHub Issues (label=%s, repo=%s)", label, repo)
@@ -306,6 +600,10 @@ async def orchestrate(
         tasks = load_tasks(plan_path)
         issue_source = None
     log.info("Loaded %d tasks", len(tasks))
+
+    if dry_run:
+        dry_run_plan(tasks, max_workers)
+        return
 
     state = OrchestratorState(tasks, repo, timeout, log_dir_path, max_retries=max_retries)
     worker_counter = 0
@@ -327,6 +625,12 @@ async def orchestrate(
                 try:
                     result: WorkerResult = future.result()
                     state.results.append(result)
+                    # Record elapsed time and cost from the finished worker
+                    state.task_durations[task_id] = result.elapsed_seconds
+                    if result.cost_usd is not None:
+                        state.task_costs[task_id] = result.cost_usd
+                    if result.num_turns is not None:
+                        state.task_prompts[task_id] = result.num_turns
                     if result.success and result.pr_number is not None:
                         # Launch review/fix/merge pipeline
                         log.info(
@@ -368,6 +672,8 @@ async def orchestrate(
                                 )
                             )
                             state.active_workers[task_id] = retry_future
+                            state.task_durations.pop(task_id, None)
+                            state.task_start_times[task_id] = datetime.now(timezone.utc)
                         else:
                             state.failed_ids.add(task_id)
                             log.error(
@@ -397,6 +703,8 @@ async def orchestrate(
                             )
                         )
                         state.active_workers[task_id] = retry_future
+                        state.task_durations.pop(task_id, None)
+                        state.task_start_times[task_id] = datetime.now(timezone.utc)
                     else:
                         state.failed_ids.add(task_id)
                         log.error("Task %s raised exception: %s", task_id, exc)
@@ -469,6 +777,7 @@ async def orchestrate(
                     run_worker(executor, state, task, worker_counter)
                 )
                 state.active_workers[task.id] = future
+                state.task_start_times[task.id] = datetime.now(timezone.utc)
                 write_status(state, status_path)
                 live.update(build_table(state))
 
@@ -482,6 +791,14 @@ async def orchestrate(
     console.rule("[bold green]Orchestration Complete")
     console.print(f"  Completed: {len(state.completed_ids)}")
     console.print(f"  Failed:    {len(state.failed_ids)}")
+    total_elapsed = sum(state.task_durations.values())
+    total_cost = sum(state.task_costs.values())
+    total_prompts = sum(state.task_prompts.values())
+    console.print(f"  Elapsed:   {_format_duration(total_elapsed)}")
+    if total_cost > 0:
+        console.print(f"  Cost:      ${total_cost:.4f}")
+    if total_prompts > 0:
+        console.print(f"  Prompts:   {total_prompts}")
     for r in state.results:
         if r.pr_url:
             console.print(f"  PR: {r.pr_url}")
@@ -536,6 +853,21 @@ def main() -> None:
         default="./logs",
         help="Directory for worker log files and status.json (default: ./logs)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print the execution plan without spawning workers (default: False)",
+    )
+    parser.add_argument(
+        "--decompose",
+        action="store_true",
+        default=False,
+        help=(
+            "Before fetching tasks, decompose vague agent-ready issues into "
+            "sub-tasks using the DecomposerAgent (only applies when --source=issues)"
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -554,6 +886,8 @@ def main() -> None:
             label=args.label,
             max_retries=args.max_retries,
             log_dir=args.log_dir,
+            dry_run=args.dry_run,
+            decompose=args.decompose,
         ))
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted![/bold red] Cancelling active workers…")

@@ -25,17 +25,32 @@ You are a thorough but fair code reviewer. Review the following pull request and
 
 ## Review Instructions
 
-Focus on:
-- Bugs and logic errors (must request_changes)
-- Missing error handling for realistic failure modes (must request_changes)
-- Incorrect or missing type hints (request_changes or warning)
-- Missing test coverage for new logic (must request_changes)
-- Security issues such as injection, path traversal, secret exposure (must request_changes)
-- Code style issues (suggestion only — never request_changes for style alone)
+Your default verdict is APPROVE. Only use `request_changes` when there is a genuine blocking problem.
 
-Be lenient on minor style preferences (naming conventions, formatting, docstring style).
-Only use `request_changes` for actual bugs, missing tests, or real problems.
-Style nits must be `suggestion` severity.
+### Severity levels — use exactly one per comment:
+
+- **error** — A blocking problem that MUST be fixed before merging. Reserve this for:
+  - Actual bugs or logic errors that would cause incorrect behaviour
+  - Missing error handling for realistic, likely failure modes
+  - Security issues (injection, path traversal, secret exposure, etc.)
+  - Missing test coverage for newly added functions or logic branches
+  - Incorrect type hints that would cause runtime failures
+
+- **warning** — A non-blocking issue worth fixing but not blocking. Use for:
+  - Incorrect or missing type hints that are merely imprecise (not crash-causing)
+  - Potential edge cases that are unlikely but worth considering
+  - Moderate design concerns that have a clear improvement path
+
+- **suggestion** — A minor improvement or preference. Use for:
+  - Code style preferences (naming, formatting, docstring style)
+  - Readability tweaks
+  - Optional refactoring ideas
+  - Any nitpick that a reasonable developer might disagree with
+
+### Verdict rules:
+- Set verdict to `request_changes` ONLY if at least one comment has severity `error`.
+- Set verdict to `approve` if all comments are `warning` or `suggestion` (or there are no comments).
+- Do NOT use `request_changes` for style, naming, or minor improvements — always `approve` with `suggestion` comments instead.
 
 Respond with exactly this JSON structure:
 {{
@@ -283,6 +298,16 @@ class ReviewAgent:
         verdict = data.get("verdict", "")
         if verdict not in ("approve", "request_changes"):
             raise ReviewError(f"Unexpected verdict value: {verdict!r}")
+
+        # Enforce threshold: REQUEST_CHANGES only if at least one comment is severity "error".
+        # This overrides the model's verdict to prevent false positives from style suggestions.
+        comments = data.get("comments", [])
+        has_error = any(c.get("severity") == "error" for c in comments)
+        if verdict == "request_changes" and not has_error:
+            logger.info(
+                "Overriding verdict from request_changes to approve — no error-severity comments found"
+            )
+            data["verdict"] = "approve"
 
         return data
 

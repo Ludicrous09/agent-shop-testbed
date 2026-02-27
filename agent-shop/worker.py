@@ -40,6 +40,8 @@ class WorkerResult:
     files_changed: list[str] = field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    cost_usd: float | None = None
+    num_turns: int | None = None
 
     @property
     def elapsed_seconds(self) -> float:
@@ -84,8 +86,14 @@ class Worker:
         )
         try:
             self._setup_worktree()
-            claude_output = self._run_claude()
+            claude_output, parsed = self._run_claude()
             result.claude_output = claude_output
+            self._enforce_file_scope()
+            if parsed is not None:
+                raw_cost = parsed.get("cost_usd")
+                raw_turns = parsed.get("num_turns")
+                result.cost_usd = float(raw_cost) if raw_cost is not None else None
+                result.num_turns = int(raw_turns) if raw_turns is not None else None
             result.files_changed = self._verify_changes()
             self._push()
             pr_url, pr_number = self._create_pr(result)
@@ -140,7 +148,7 @@ class Worker:
         )
         logger.info("Created worktree on branch %s", self.branch)
 
-    def _run_claude(self) -> str:
+    def _run_claude(self) -> tuple[str, dict | None]:
         prompt = self._build_prompt()
         cmd = [
             "claude",
@@ -183,11 +191,12 @@ class Worker:
         output = proc.stdout
         self._log(f"claude output length: {len(output)} chars")
 
-        # Try to parse JSON output for cost/turn info
+        # Parse JSON output once for cost/turn info and return to caller
+        parsed: dict | None = None
         try:
-            data = json.loads(output)
-            cost = data.get("cost_usd", "unknown")
-            turns = data.get("num_turns", "unknown")
+            parsed = json.loads(output)
+            cost = parsed.get("cost_usd", "unknown")
+            turns = parsed.get("num_turns", "unknown")
             logger.info("Task %s - cost: $%s, turns: %s", self.task.id, cost, turns)
             self._log(f"cost: ${cost}, turns: {turns}")
         except (json.JSONDecodeError, TypeError):
@@ -195,7 +204,105 @@ class Worker:
                 "Could not parse claude JSON output for task %s", self.task.id
             )
 
-        return output
+        return output, parsed
+
+    def _enforce_file_scope(self) -> None:
+        """Revert any files modified outside of task.files_touched."""
+        if not self.task.files_touched:
+            return
+
+        allowed = set(self.task.files_touched)
+
+        # Get all files changed relative to main (staged + unstaged + committed)
+        diff_result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        staged_result = subprocess.run(
+            ["git", "diff", "--name-only", "--cached"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        # Also check committed changes vs main
+        committed_result = subprocess.run(
+            ["git", "diff", "--name-only", "main..HEAD"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        # Catch untracked files created but never staged
+        untracked_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+
+        changed = set()
+        for output in (
+            diff_result.stdout,
+            staged_result.stdout,
+            committed_result.stdout,
+            untracked_result.stdout,
+        ):
+            for line in output.strip().splitlines():
+                f = line.strip()
+                if f:
+                    changed.add(f)
+
+        unauthorized = changed - allowed
+        if not unauthorized:
+            return
+
+        logger.warning(
+            "Task %s modified unauthorized files (will revert): %s",
+            self.task.id,
+            sorted(unauthorized),
+        )
+        self._log(f"Reverting unauthorized files: {sorted(unauthorized)}")
+
+        for filepath in sorted(unauthorized):
+            # Check whether the file exists in main
+            cat_file = subprocess.run(
+                ["git", "cat-file", "-e", f"main:{filepath}"],
+                cwd=self.worktree_path,
+                capture_output=True,
+                text=True,
+            )
+            if cat_file.returncode == 0:
+                # File exists in main — restore it to the main version.
+                # NOTE: if the file was already committed on this branch, the
+                # original commit remains visible in branch history. The revert
+                # is recorded as a follow-up commit, producing an add-then-revert
+                # pair in the PR diff. A stronger guarantee would require an
+                # interactive rebase/squash to drop the offending commit entirely,
+                # but that is not implemented here.
+                revert = subprocess.run(
+                    ["git", "checkout", "main", "--", filepath],
+                    cwd=self.worktree_path,
+                    capture_output=True,
+                    text=True,
+                )
+                if revert.returncode != 0:
+                    logger.warning(
+                        "Could not revert %s: %s", filepath, revert.stderr[:200]
+                    )
+            else:
+                # File is new (not in main) — delete it from disk and index
+                full_path = self.worktree_path / filepath
+                try:
+                    full_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Could not delete %s: %s", filepath, exc)
+                subprocess.run(
+                    ["git", "rm", "--cached", "-f", "--", filepath],
+                    cwd=self.worktree_path,
+                    capture_output=True,
+                    text=True,
+                )
 
     def _verify_changes(self) -> list[str]:
         # Check for uncommitted changes and auto-commit them
@@ -322,7 +429,15 @@ class Worker:
     def _build_prompt(self) -> str:
         desc = self.task.description
         title = self.task.title
+        file_scope = ""
+        if self.task.files_touched:
+            files_list = ", ".join(self.task.files_touched)
+            file_scope = (
+                f"You MUST only create or modify these files: {files_list}. "
+                f"Do not touch any other files.\n\n"
+            )
         return (
+            f"{file_scope}"
             f"{desc}\n\n"
             f"After making your changes:\n"
             f"1. Run pytest to make sure all tests pass\n"
