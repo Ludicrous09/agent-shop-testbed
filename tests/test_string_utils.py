@@ -115,6 +115,13 @@ def test_truncate_suffix_longer_than_max():
     assert truncate("hello world", 3) == "..."
 
 
+def test_truncate_max_length_less_than_suffix():
+    # max_length < len(suffix): result should be suffix[:max_length]
+    assert truncate("hello world", 2) == ".."
+    assert truncate("hello world", 1) == "."
+    assert truncate("hello world", 0) == ""
+
+
 def test_truncate_default_suffix():
     result = truncate("a very long string indeed", 10)
     assert result == "a very ..."
