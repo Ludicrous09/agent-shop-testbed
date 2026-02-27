@@ -40,11 +40,11 @@ from worker import Task
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
-_FILES_HEADER = re.compile(r"^\s*files\s*:\s*$", re.IGNORECASE | re.MULTILINE)
+_FILES_HEADER = re.compile(r"^\s*(?:#{1,3}\s+)?files\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
 _FILES_ITEM = re.compile(r"^\s*[-*]\s+(.+)$", re.MULTILINE)
-_DEPENDS_ON = re.compile(r"depends\s+on\s*:\s*(.+)", re.IGNORECASE)
+_DEPENDS_ON = re.compile(r"(?:#{1,3}\s+)?depends\s+on\s*:?\s*(.+)", re.IGNORECASE)
 _DEPENDS_REF = re.compile(r"#(\d+)")
-_MAX_TURNS = re.compile(r"max\s+turns\s*:\s*(\d+)", re.IGNORECASE)
+_MAX_TURNS = re.compile(r"(?:#{1,3}\s+)?max\s+turns\s*:?\s*(\d+)", re.IGNORECASE)
 _PRIORITY_LABEL = re.compile(r"^priority:(\d+)$", re.IGNORECASE)
 
 
