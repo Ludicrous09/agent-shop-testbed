@@ -6,6 +6,8 @@ import json
 import logging
 import subprocess
 import sys
+import time
+import traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -15,11 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from task_manager import load_tasks, get_ready_tasks
 from worker import Task, Worker, WorkerResult
-from reviewer import ReviewAgent
+from reviewer import ReviewAgent, ReviewResult
 from fixer import FixAgent
 from issue_source import IssueSource
 from decomposer import DecomposerAgent, is_vague
 from conflict_resolver import ConflictResolver
+from architect import ArchitectAgent
 
 from rich.console import Console
 from rich.live import Live
@@ -54,6 +57,7 @@ class OrchestratorState:
         self.task_durations: dict[str, float] = {}  # task_id -> elapsed seconds (completed/failed)
         self.task_costs: dict[str, float] = {}  # task_id -> cost_usd from claude output
         self.task_prompts: dict[str, int] = {}  # task_id -> num_turns from claude output
+        self.current_priority: int | None = None  # priority group currently being processed
 
     # Convenience counts
     @property
@@ -134,6 +138,7 @@ class OrchestratorState:
                 "total_cost_usd": total_cost,
                 "total_prompts": total_prompts,
             },
+            "current_priority": self.current_priority,
             "retries": dict(self.retry_counts),
             "prs": [
                 {"task_id": r.task_id, "pr_url": r.pr_url, "pr_number": r.pr_number}
@@ -218,7 +223,13 @@ def build_table(state: OrchestratorState) -> Table:
     cost_summary = f"${total_cost:.4f}" if total_cost > 0 else "N/A"
     prompts_summary = str(total_prompts) if total_prompts > 0 else "N/A"
 
+    priority_str = (
+        f"Priority Group: {state.current_priority}  |  "
+        if state.current_priority is not None
+        else ""
+    )
     table.caption = (
+        f"{priority_str}"
         f"Total: {state.total}  "
         f"Active: {state.active}  "
         f"Completed: {len(state.completed_ids)}  "
@@ -231,136 +242,392 @@ def build_table(state: OrchestratorState) -> Table:
 
 
 # ---------------------------------------------------------------------------
+# Review follow-up issue helpers
+# ---------------------------------------------------------------------------
+
+_FOLLOWUP_LABEL_COLOR = "d8b4fe"  # light purple
+
+
+def _check_label_exists(repo_path: Path, label_name: str) -> bool:
+    """Return True if *label_name* already exists in the repository."""
+    proc = subprocess.run(
+        ["gh", "label", "list", "--json", "name", "--limit", "200"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    try:
+        return label_name in {lbl["name"] for lbl in json.loads(proc.stdout)}
+    except (json.JSONDecodeError, KeyError):
+        return False
+
+
+def _ensure_review_followup_label(repo_path: Path) -> None:
+    """Create the 'review-followup' label if it doesn't already exist."""
+    check = subprocess.run(
+        ["gh", "label", "list", "--json", "name", "--limit", "200"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode == 0:
+        try:
+            existing = {lbl["name"] for lbl in json.loads(check.stdout)}
+            if "review-followup" in existing:
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    proc = subprocess.run(
+        [
+            "gh", "label", "create", "review-followup",
+            "--color", _FOLLOWUP_LABEL_COLOR,
+            "--description", "Follow-up issues from PR review warnings/suggestions",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        log.warning("Failed to create review-followup label: %s", proc.stderr[:300])
+    else:
+        log.info("Created 'review-followup' label")
+
+
+def _create_followup_issues(
+    repo_path: Path,
+    review: ReviewResult,
+    pr_number: int,
+    pr_url: str,
+) -> list[str]:
+    """Create GitHub follow-up issues for WARNING and SUGGESTION review comments.
+
+    Returns list of created issue URLs.
+    Skips comments shorter than 20 chars and deduplicates against existing issues.
+    The ``priority:3`` label is only added when it already exists in the repo to
+    avoid silently dropping issues due to a missing label.
+    """
+    created_urls: list[str] = []
+    priority_label_exists = _check_label_exists(repo_path, "priority:3")
+
+    for comment in review.comments:
+        if comment.severity not in ("warning", "suggestion"):
+            continue
+
+        text = comment.comment.strip()
+        if len(text) < 20:
+            log.debug(
+                "Skipping short review comment (%d chars) in %s:%d",
+                len(text),
+                comment.file,
+                comment.line,
+            )
+            continue
+
+        # Build a short title from the first sentence / first 60 chars
+        brief = text.split(".")[0].strip()
+        if len(brief) > 60:
+            brief = brief[:57] + "..."
+        title = f"[Review Follow-up] {brief}"
+
+        # Deduplicate: search for open issues with the [Review Follow-up] prefix
+        search_proc = subprocess.run(
+            [
+                "gh", "issue", "list",
+                "--search", "[Review Follow-up] in:title",
+                "--state", "open",
+                "--json", "title",
+                "--limit", "100",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if search_proc.returncode == 0:
+            try:
+                existing_titles = {iss["title"] for iss in json.loads(search_proc.stdout)}
+                if title in existing_titles:
+                    log.info("Skipping duplicate follow-up issue: %s", title)
+                    continue
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        body = (
+            f"**Severity:** {comment.severity.upper()}\n"
+            f"**File:** `{comment.file}:{comment.line}`\n"
+            "\n"
+            "## Original Review Comment\n"
+            "\n"
+            f"{text}\n"
+            "\n"
+            "---\n"
+            f"*Created automatically from review of {pr_url} (PR #{pr_number})*"
+        )
+
+        create_cmd = [
+            "gh", "issue", "create",
+            "--title", title,
+            "--body", body,
+            "--label", "agent-ready",
+            "--label", "review-followup",
+        ]
+        if priority_label_exists:
+            create_cmd += ["--label", "priority:3"]
+
+        create_proc = subprocess.run(
+            create_cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if create_proc.returncode != 0:
+            log.warning(
+                "Failed to create follow-up issue for %s:%d: %s",
+                comment.file,
+                comment.line,
+                create_proc.stderr[:300],
+            )
+        else:
+            issue_url = create_proc.stdout.strip()
+            log.info("Created follow-up issue: %s", issue_url)
+            created_urls.append(issue_url)
+
+    return created_urls
+
+
+# ---------------------------------------------------------------------------
 # Review / Fix / Merge pipeline
 # ---------------------------------------------------------------------------
 
 MAX_FIX_ATTEMPTS = 2
 
 
-def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> bool:
-    """Blocking review/fix/merge cycle. Returns True on successful merge."""
+def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool, str]:
+    """Blocking review/fix/merge cycle. Returns (True, '') on success or (False, error_msg) on failure."""
     pr = result.pr_number
     assert pr is not None
+    pr_url = result.pr_url or f"PR #{pr}"
 
-    for attempt in range(MAX_FIX_ATTEMPTS + 1):
-        log.info("Reviewing PR #%d (attempt %d/%d)", pr, attempt + 1, MAX_FIX_ATTEMPTS + 1)
-        try:
-            reviewer = ReviewAgent(repo_path=repo_path, pr_number=pr)
-            review = reviewer.review()
-        except Exception as exc:
-            log.error("ReviewAgent failed for PR #%d: %s", pr, exc)
-            return False
-
-        if review.verdict == "approve":
-            log.info("PR #%d approved — merging", pr)
-            proc = subprocess.run(
-                ["gh", "pr", "merge", str(pr), "--squash", "--delete-branch"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-            )
-            if proc.returncode != 0:
-                # Check if the failure is due to merge conflicts
-                combined = (proc.stderr + proc.stdout).lower()
-                is_conflict = any(
-                    kw in combined for kw in ("conflict", "not mergeable")
+    try:
+        for attempt in range(MAX_FIX_ATTEMPTS + 1):
+            log.info("Reviewing PR #%d (attempt %d/%d)", pr, attempt + 1, MAX_FIX_ATTEMPTS + 1)
+            try:
+                reviewer = ReviewAgent(repo_path=repo_path, pr_number=pr)
+                review = reviewer.review()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                log.error("ReviewAgent failed for PR #%d: %s", pr, exc)
+                error_msg = (
+                    f"**Review step failed** for {pr_url}\n\n"
+                    f"**Error:** {exc}\n\n"
+                    f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
                 )
-                if is_conflict:
+                return False, error_msg
+
+            if review.verdict == "approve":
+                log.info("PR #%d approved — checking mergeability before merge", pr)
+                # Sleep briefly to allow GitHub to compute merge status after the push
+                time.sleep(2)
+
+                mergeable_proc = subprocess.run(
+                    ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                mergeable = mergeable_proc.stdout.strip()
+                log.info("PR #%d mergeability: %s", pr, mergeable)
+
+                if mergeable in ("CONFLICTING", "UNKNOWN"):
                     log.info(
-                        "PR #%d merge failed due to conflicts — attempting auto-resolution",
+                        "PR #%d is %s — attempting automatic conflict resolution",
                         pr,
+                        mergeable,
                     )
                     resolver = ConflictResolver(repo_path=repo_path, pr_number=pr)
                     conflict_result = resolver.resolve()
                     if conflict_result.success:
                         log.info(
-                            "Conflicts resolved in PR #%d (%d files) — retrying merge",
+                            "Conflicts resolved in PR #%d (%d files) — re-checking mergeability",
                             pr,
                             len(conflict_result.resolved_files),
                         )
-                        retry_proc = subprocess.run(
-                            ["gh", "pr", "merge", str(pr), "--squash", "--delete-branch"],
+                        # Sleep to allow GitHub to recompute merge status after push
+                        time.sleep(2)
+                        retry_mergeable_proc = subprocess.run(
+                            ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
                         )
-                        if retry_proc.returncode == 0:
-                            log.info("PR #%d merged after conflict resolution", pr)
-                            subprocess.run(
-                                ["git", "pull"],
-                                cwd=repo_path,
-                                capture_output=True,
-                                text=True,
+                        mergeable = retry_mergeable_proc.stdout.strip()
+                        log.info("PR #%d mergeability after resolution: %s", pr, mergeable)
+                        if mergeable != "MERGEABLE":
+                            log.error(
+                                "PR #%d still not mergeable after conflict resolution (status: %s)",
+                                pr,
+                                mergeable,
                             )
-                            return True
-                        log.error(
-                            "gh pr merge failed again after conflict resolution for PR #%d: %s",
-                            pr,
-                            retry_proc.stderr[:500],
-                        )
+                            error_msg = (
+                                f"**Merge step failed** for {pr_url}\n\n"
+                                f"PR is not mergeable after conflict resolution "
+                                f"(status: `{mergeable}`)."
+                            )
+                            return False, error_msg
                     else:
                         log.error(
                             "Conflict resolution failed for PR #%d: %s",
                             pr,
                             conflict_result.error,
                         )
-                else:
+                        error_msg = (
+                            f"**Merge step failed** for {pr_url}\n\n"
+                            f"Conflict resolution failed: {conflict_result.error}"
+                        )
+                        return False, error_msg
+                elif mergeable != "MERGEABLE":
+                    log.error(
+                        "PR #%d is not mergeable (status: %s) — skipping merge",
+                        pr,
+                        mergeable,
+                    )
+                    error_msg = (
+                        f"**Merge step failed** for {pr_url}\n\n"
+                        f"PR is not mergeable (status: `{mergeable}`)."
+                    )
+                    return False, error_msg
+
+                log.info("PR #%d is MERGEABLE — merging", pr)
+                proc = subprocess.run(
+                    ["gh", "pr", "merge", str(pr), "--squash", "--delete-branch"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode != 0:
                     log.error(
                         "gh pr merge failed for PR #%d (code %d): %s",
                         pr,
                         proc.returncode,
                         proc.stderr[:500],
                     )
-                return False
+                    error_msg = (
+                        f"**Merge step failed** for {pr_url}\n\n"
+                        f"`gh pr merge` exited with code {proc.returncode}.\n\n"
+                        f"**stderr:**\n```\n{proc.stderr[:500]}\n```"
+                    )
+                    return False, error_msg
 
-            log.info("PR #%d merged — pulling latest main", pr)
-            pull = subprocess.run(
-                ["git", "pull"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-            )
-            if pull.returncode != 0:
-                log.warning("git pull after merge failed: %s", pull.stderr[:300])
+                log.info("PR #%d merged — pulling latest main", pr)
+                pull = subprocess.run(
+                    ["git", "pull"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                if pull.returncode != 0:
+                    log.warning("git pull after merge failed: %s", pull.stderr[:300])
 
-            return True
+                # Create follow-up issues for WARNING/SUGGESTION review comments
+                try:
+                    _ensure_review_followup_label(repo_path)
+                    followup_urls = _create_followup_issues(repo_path, review, pr, pr_url)
+                    if followup_urls:
+                        items = "\n".join(f"- {u}" for u in followup_urls)
+                        summary_body = (
+                            "## Review Follow-up Issues Created\n\n"
+                            "The following issues were created from review "
+                            "warnings/suggestions:\n\n"
+                            f"{items}"
+                        )
+                        comment_proc = subprocess.run(
+                            ["gh", "pr", "comment", str(pr), "--body", summary_body],
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if comment_proc.returncode != 0:
+                            log.warning(
+                                "Failed to post follow-up summary comment on PR #%d: %s",
+                                pr,
+                                comment_proc.stderr[:300],
+                            )
+                        else:
+                            log.info(
+                                "Posted follow-up summary on PR #%d (%d issues)",
+                                pr,
+                                len(followup_urls),
+                            )
+                except Exception as exc:
+                    log.warning(
+                        "Error creating follow-up issues for PR #%d: %s", pr, exc
+                    )
 
-        # verdict == "request_changes"
-        if attempt >= MAX_FIX_ATTEMPTS:
-            log.error(
-                "PR #%d still not approved after %d fix attempt(s) — marking failed",
+                return True, ""
+
+            # verdict == "request_changes"
+            if attempt >= MAX_FIX_ATTEMPTS:
+                log.error(
+                    "PR #%d still not approved after %d fix attempt(s) — marking failed",
+                    pr,
+                    MAX_FIX_ATTEMPTS,
+                )
+                error_msg = (
+                    f"**Review step failed** for {pr_url}\n\n"
+                    f"PR was not approved after {MAX_FIX_ATTEMPTS} fix attempt(s). "
+                    f"Last review verdict: `{review.verdict}`."
+                )
+                return False, error_msg
+
+            log.info(
+                "PR #%d needs changes — running FixAgent (fix %d/%d)",
                 pr,
+                attempt + 1,
                 MAX_FIX_ATTEMPTS,
             )
-            return False
+            try:
+                fixer = FixAgent(repo_path=repo_path, pr_number=pr)
+                fix_result = fixer.fix()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                log.error("FixAgent raised for PR #%d: %s", pr, exc)
+                error_msg = (
+                    f"**Fix step failed** for {pr_url}\n\n"
+                    f"**Error:** {exc}\n\n"
+                    f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+                )
+                return False, error_msg
 
-        log.info(
-            "PR #%d needs changes — running FixAgent (fix %d/%d)",
-            pr,
-            attempt + 1,
-            MAX_FIX_ATTEMPTS,
+            if not fix_result.success:
+                log.error("FixAgent failed for PR #%d: %s", pr, fix_result.error)
+                error_msg = (
+                    f"**Fix step failed** for {pr_url}\n\n"
+                    f"FixAgent reported failure: {fix_result.error}"
+                )
+                return False, error_msg
+
+            log.info("Fix applied to PR #%d — re-reviewing", pr)
+
+        return False, f"**Review/fix/merge cycle exhausted** for {pr_url}"  # unreachable but satisfies type checkers
+
+    except Exception as exc:
+        tb = traceback.format_exc()
+        log.error("Unexpected error in review/fix/merge for PR #%d: %s", pr, exc)
+        error_msg = (
+            f"**Unexpected error** in review/fix/merge cycle for {pr_url}\n\n"
+            f"**Error:** {exc}\n\n"
+            f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
         )
-        try:
-            fixer = FixAgent(repo_path=repo_path, pr_number=pr)
-            fix_result = fixer.fix()
-        except Exception as exc:
-            log.error("FixAgent raised for PR #%d: %s", pr, exc)
-            return False
-
-        if not fix_result.success:
-            log.error("FixAgent failed for PR #%d: %s", pr, fix_result.error)
-            return False
-
-        log.info("Fix applied to PR #%d — re-reviewing", pr)
-
-    return False  # unreachable but satisfies type checkers
+        return False, error_msg
 
 
 async def run_review_fix_merge(
     executor: ThreadPoolExecutor,
     repo_path: Path,
     result: WorkerResult,
-) -> bool:
+) -> tuple[bool, str]:
     """Run _review_fix_merge_sync in a thread via run_in_executor."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _review_fix_merge_sync, repo_path, result)
@@ -492,14 +759,62 @@ def _cleanup_failed_branch(repo_path: Path, branch: str) -> None:
         )
 
 
+def _enrich_task_with_architect(task: Task, repo_path: Path) -> None:
+    """Run ArchitectAgent on *task* and prepend the spec to task.description.
+
+    Extracts the issue number from a task ID of the form ``issue-N``.  If the
+    task ID does not follow that pattern, or if the architect call raises, a
+    warning is logged and the task description is left unchanged so that the
+    worker can still proceed.
+    """
+    if not task.id.startswith("issue-"):
+        log.info(
+            "Task %s is not from a GitHub issue — skipping architect enrichment",
+            task.id,
+        )
+        return
+
+    try:
+        issue_number = int(task.id.split("-", 1)[1])
+    except (IndexError, ValueError):
+        log.warning("Could not parse issue number from task id %r", task.id)
+        return
+
+    try:
+        agent = ArchitectAgent(issue_number=issue_number, repo_path=repo_path)
+        spec = agent.design()
+        task.description = (
+            f"## Architect Spec\n{spec}\n\n## Original Issue\n{task.description}"
+        )
+        log.info(
+            "Enriched task %s with architect spec (%d chars)", task.id, len(spec)
+        )
+    except Exception as exc:
+        log.warning(
+            "ArchitectAgent failed for task %s: %s — continuing without spec",
+            task.id,
+            exc,
+        )
+
+
 async def run_worker(
     executor: ThreadPoolExecutor,
     state: OrchestratorState,
-    task,
+    task: Task,
     worker_counter: int,
     branch_suffix: str = "",
+    use_architect: bool = False,
 ) -> WorkerResult:
-    """Run a single Worker.run() in a thread via run_in_executor."""
+    """Run a single Worker.run() in a thread via run_in_executor.
+
+    When *use_architect* is True, runs :func:`_enrich_task_with_architect` in
+    the executor first so that the worker receives an augmented description.
+    """
+    loop = asyncio.get_running_loop()
+    if use_architect:
+        await loop.run_in_executor(
+            executor, _enrich_task_with_architect, task, state.repo_path
+        )
     worker = Worker(
         repo_path=state.repo_path,
         task=task,
@@ -508,7 +823,6 @@ async def run_worker(
         branch_suffix=branch_suffix,
         log_dir=state.log_dir,
     )
-    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, worker.run)
 
 
@@ -574,6 +888,7 @@ async def orchestrate(
     log_dir: str = "./logs",
     dry_run: bool = False,
     decompose: bool = False,
+    architect: bool = False,
 ) -> None:
     repo = Path(repo_path).resolve()
     # status.json stays local to the orchestrator's working directory,
@@ -608,6 +923,21 @@ async def orchestrate(
     state = OrchestratorState(tasks, repo, timeout, log_dir_path, max_retries=max_retries)
     worker_counter = 0
     executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    # Group tasks by priority level and process one group at a time
+    priority_groups: dict[int, list[Task]] = defaultdict(list)
+    for task in tasks:
+        priority_groups[task.priority].append(task)
+    sorted_priorities = sorted(priority_groups.keys())
+    current_priority_idx = 0
+
+    if sorted_priorities:
+        state.current_priority = sorted_priorities[0]
+        log.info(
+            "Starting with priority group %d (%d tasks)",
+            sorted_priorities[0],
+            len(priority_groups[sorted_priorities[0]]),
+        )
 
     with Live(build_table(state), console=console, refresh_per_second=2) as live:
         while True:
@@ -668,7 +998,8 @@ async def orchestrate(
                             state.active_files.update(task_obj.files_touched)
                             retry_future = asyncio.ensure_future(
                                 run_worker(
-                                    executor, state, task_obj, worker_counter, branch_suffix
+                                    executor, state, task_obj, worker_counter,
+                                    branch_suffix, use_architect=architect,
                                 )
                             )
                             state.active_workers[task_id] = retry_future
@@ -699,7 +1030,8 @@ async def orchestrate(
                         state.active_files.update(task_obj.files_touched)
                         retry_future = asyncio.ensure_future(
                             run_worker(
-                                executor, state, task_obj, worker_counter, branch_suffix
+                                executor, state, task_obj, worker_counter,
+                                branch_suffix, use_architect=architect,
                             )
                         )
                         state.active_workers[task_id] = retry_future
@@ -718,7 +1050,7 @@ async def orchestrate(
             for task_id in done_review_ids:
                 future = state.review_futures.pop(task_id)
                 try:
-                    merged: bool = future.result()
+                    merged, error_msg = future.result()
                     if merged:
                         state.completed_ids.add(task_id)
                         log.info("Task %s merged successfully", task_id)
@@ -734,39 +1066,90 @@ async def orchestrate(
                         log.error("Task %s failed review/fix/merge cycle", task_id)
                         if issue_source and task_id.startswith("issue-"):
                             try:
-                                issue_source.mark_failed(task_id, "Review/fix/merge cycle failed")
+                                issue_source.mark_failed(task_id, error_msg or "Review/fix/merge cycle failed")
                             except Exception as exc:
                                 log.warning("Failed to mark issue failed for %s: %s", task_id, exc)
                 except Exception as exc:
+                    tb = traceback.format_exc()
                     state.failed_ids.add(task_id)
                     log.error("Task %s review pipeline raised: %s", task_id, exc)
+                    if issue_source and task_id.startswith("issue-"):
+                        pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
+                        pr_ref = pr_url or f"task {task_id}"
+                        error_msg = (
+                            f"**Unexpected error** in review/fix/merge pipeline for {pr_ref}\n\n"
+                            f"**Error:** {exc}\n\n"
+                            f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+                        )
+                        try:
+                            issue_source.mark_failed(task_id, error_msg)
+                        except Exception as mark_exc:
+                            log.warning("Failed to mark issue failed for %s: %s", task_id, mark_exc)
 
                 write_status(state, status_path)
                 live.update(build_table(state))
+
+            # Check if current priority group is complete; advance to next if so
+            if sorted_priorities and current_priority_idx < len(sorted_priorities):
+                current_priority = sorted_priorities[current_priority_idx]
+                current_group_ids = {t.id for t in priority_groups[current_priority]}
+                group_settled = current_group_ids & (state.completed_ids | state.failed_ids)
+                group_in_flight = current_group_ids & (
+                    set(state.active_workers) | set(state.review_futures)
+                )
+
+                if len(group_settled) == len(current_group_ids) and not group_in_flight:
+                    group_completed = len(current_group_ids & state.completed_ids)
+                    group_failed = len(current_group_ids & state.failed_ids)
+                    log.info(
+                        "Priority %d complete: %d succeeded, %d failed",
+                        current_priority,
+                        group_completed,
+                        group_failed,
+                    )
+                    if current_priority_idx + 1 < len(sorted_priorities):
+                        current_priority_idx += 1
+                        state.current_priority = sorted_priorities[current_priority_idx]
+                        log.info(
+                            "Advancing to priority group %d (%d tasks)",
+                            state.current_priority,
+                            len(priority_groups[state.current_priority]),
+                        )
+                        write_status(state, status_path)
+                        live.update(build_table(state))
 
             # Are we done?
             all_settled = state.completed_ids | state.failed_ids
             if len(all_settled) == state.total:
                 log.info("All tasks settled — exiting")
                 break
-            if state.active == 0 and state.queued == 0 and state.reviewing == 0:
-                log.info("No active workers, nothing queued, no reviews pending — exiting")
-                break
 
-            # Spawn new workers for ready tasks
+            # Determine ready tasks for the current priority group
+            if sorted_priorities and current_priority_idx < len(sorted_priorities):
+                current_priority = sorted_priorities[current_priority_idx]
+                current_group_ids = {t.id for t in priority_groups[current_priority]}
+            else:
+                current_group_ids = set()
+
             ready = get_ready_tasks(
                 tasks,
                 state.completed_ids,
                 state.active_files,
             )
-            # Filter out already-active and failed tasks
+            # Filter to current priority group and exclude already-active/settled tasks
             ready = [
                 t for t in ready
-                if t.id not in state.active_workers
+                if t.id in current_group_ids
+                and t.id not in state.active_workers
                 and t.id not in state.failed_ids
                 and t.id not in state.review_futures
                 and t.id not in state.completed_ids
             ]
+
+            # Safety exit: nothing running, nothing to spawn — avoid infinite loop
+            if state.active == 0 and state.reviewing == 0 and not ready:
+                log.info("No active workers, no reviews pending, no tasks ready — exiting")
+                break
 
             slots = max_workers - state.active
             for task in ready[:slots]:
@@ -774,7 +1157,10 @@ async def orchestrate(
                 log.info("Spawning worker for task %s", task.id)
                 state.active_files.update(task.files_touched)
                 future = asyncio.ensure_future(
-                    run_worker(executor, state, task, worker_counter)
+                    run_worker(
+                        executor, state, task, worker_counter,
+                        use_architect=architect,
+                    )
                 )
                 state.active_workers[task.id] = future
                 state.task_start_times[task.id] = datetime.now(timezone.utc)
@@ -868,6 +1254,16 @@ def main() -> None:
             "sub-tasks using the DecomposerAgent (only applies when --source=issues)"
         ),
     )
+    parser.add_argument(
+        "--architect",
+        action="store_true",
+        default=False,
+        help=(
+            "Before spawning each worker, run ArchitectAgent with Claude Opus to "
+            "design a detailed implementation spec and prepend it to the task "
+            "description."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -888,6 +1284,7 @@ def main() -> None:
             log_dir=args.log_dir,
             dry_run=args.dry_run,
             decompose=args.decompose,
+            architect=args.architect,
         ))
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted![/bold red] Cancelling active workers…")

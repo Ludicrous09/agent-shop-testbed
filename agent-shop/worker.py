@@ -95,6 +95,7 @@ class Worker:
                 result.cost_usd = float(raw_cost) if raw_cost is not None else None
                 result.num_turns = int(raw_turns) if raw_turns is not None else None
             result.files_changed = self._verify_changes()
+            self._rebase_before_push()
             self._push()
             pr_url, pr_number = self._create_pr(result)
             result.pr_url = pr_url
@@ -356,6 +357,175 @@ class Worker:
             files_changed,
         )
         return files_changed
+
+    def _rebase_before_push(self) -> None:
+        """Rebase onto origin/main before pushing to prevent merge conflicts."""
+        logger.info(
+            "Fetching origin/main for rebase before push (task %s)", self.task.id
+        )
+
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        if fetch.returncode != 0:
+            logger.warning("git fetch origin main failed: %s", fetch.stderr[:300])
+            self._log(f"git fetch failed (will still push): {fetch.stderr[:200]}")
+            return
+
+        rebase = subprocess.run(
+            ["git", "rebase", "origin/main"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+
+        if rebase.returncode == 0:
+            logger.info(
+                "Rebase onto origin/main succeeded cleanly (task %s)", self.task.id
+            )
+            self._log("Rebase outcome: clean")
+            return
+
+        # Rebase had conflicts — abort and fall back to merge
+        logger.warning(
+            "Rebase had conflicts for task %s, aborting and trying merge", self.task.id
+        )
+        self._log("Rebase outcome: conflict — trying merge fallback")
+
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+
+        merge = subprocess.run(
+            ["git", "merge", "origin/main"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+
+        if merge.returncode == 0:
+            logger.info("Merge fallback succeeded for task %s", self.task.id)
+            self._log("Rebase outcome: conflict-resolved via merge")
+            return
+
+        # Merge also conflicted — delegate resolution to Claude
+        logger.warning(
+            "Merge also conflicted for task %s — delegating to Claude", self.task.id
+        )
+
+        conflict_files_result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        conflicted_files = [
+            f for f in conflict_files_result.stdout.strip().splitlines() if f
+        ]
+        self._log(f"Conflicted files: {conflicted_files}")
+
+        if conflicted_files:
+            try:
+                self._resolve_conflicts_with_claude(conflicted_files)
+                self._log("Rebase outcome: conflict-resolved via Claude")
+                return
+            except Exception as e:
+                logger.error(
+                    "Claude conflict resolution failed for task %s: %s", self.task.id, e
+                )
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=self.worktree_path,
+                    capture_output=True,
+                )
+                self._log(
+                    f"Rebase outcome: conflict resolution failed ({e})"
+                    " — will push pre-merge HEAD (branch not rebased onto main)"
+                )
+        else:
+            logger.error(
+                "Could not determine conflicted files for task %s", self.task.id
+            )
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=self.worktree_path,
+                capture_output=True,
+            )
+            self._log(
+                "Rebase outcome: conflict resolution failed (no conflicted files found)"
+                " — will push pre-merge HEAD (branch not rebased onto main)"
+            )
+
+    def _resolve_conflicts_with_claude(self, conflicted_files: list[str]) -> None:
+        """Use Claude to resolve merge conflicts in the given files."""
+        files_list = ", ".join(conflicted_files)
+        prompt = (
+            "Resolve these merge conflicts. Keep all changes from both sides. "
+            "The HEAD changes are your work, the incoming changes are from main.\n\n"
+            f"Conflicted files: {files_list}\n\n"
+            "After resolving all conflicts:\n"
+            "1. Stage the resolved files with: git add -A\n"
+            "2. Complete the merge with: git commit --no-edit\n"
+        )
+
+        cmd = [
+            "claude",
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--model",
+            self.task.model,
+            "--max-turns",
+            "10",
+            "--allowedTools",
+            "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
+            "--dangerously-skip-permissions",
+        ]
+
+        logger.info(
+            "Running Claude to resolve conflicts for task %s", self.task.id
+        )
+        self._log(f"Running Claude for conflict resolution on: {conflicted_files}")
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        proc = subprocess.run(
+            cmd,
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            env=env,
+        )
+
+        if proc.returncode != 0:
+            raise WorkerError(
+                f"Claude conflict resolution exited with {proc.returncode}:"
+                f" {proc.stderr[:300]}"
+            )
+
+        # Verify no conflicts remain
+        remaining = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=self.worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        remaining_files = [f for f in remaining.stdout.strip().splitlines() if f]
+        if remaining_files:
+            raise WorkerError(
+                f"Conflicts remain after Claude resolution: {remaining_files}"
+            )
+
+        logger.info(
+            "Claude successfully resolved conflicts for task %s", self.task.id
+        )
 
     def _push(self) -> None:
         logger.info("Pushing branch %s to origin", self.branch)
