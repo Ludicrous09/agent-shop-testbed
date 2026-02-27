@@ -1,5 +1,7 @@
 """Tests for utility functions."""
-from src.utils import add, multiply, subtract
+import pytest
+
+from src.utils import add, divide, multiply, subtract
 
 
 def test_add():
@@ -43,3 +45,33 @@ def test_subtract_negative_result():
 def test_subtract_with_negatives():
     assert subtract(-1, -3) == 2
     assert subtract(-5, 3) == -8
+
+
+def test_divide_positive_numbers():
+    assert divide(10, 2) == 5.0
+    assert divide(9, 3) == 3.0
+
+
+def test_divide_negative_numbers():
+    assert divide(-10, -2) == 5.0
+    assert divide(-9, -3) == 3.0
+
+
+def test_divide_mixed_signs():
+    assert divide(-10, 2) == -5.0
+    assert divide(10, -2) == -5.0
+
+
+def test_divide_returns_float():
+    assert divide(7, 2) == 3.5
+    assert divide(1, 4) == 0.25
+    assert isinstance(divide(4, 2), float)
+
+
+def test_divide_by_zero():
+    with pytest.raises(ZeroDivisionError):
+        divide(5, 0)
+    with pytest.raises(ZeroDivisionError):
+        divide(0, 0)
+    with pytest.raises(ZeroDivisionError):
+        divide(-5, 0)
