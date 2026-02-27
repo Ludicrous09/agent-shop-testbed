@@ -23,14 +23,17 @@
 ┌──────────────────────────────────────────────────────────┐
 │            ORCHESTRATOR (orchestrator.py)                 │
 │                                                          │
-│  • Reads GitHub Issues (--source issues) or PLAN.yaml    │
+│  • Reads GitHub Issues or PLAN.yaml                      │
 │  • Resolves dependencies + file conflict detection       │
 │  • Spawns Claude Code workers in isolated worktrees      │
-│  • Runs review/fix/merge pipeline after each PR          │
-│  • Auto-merges approved PRs, closes issues               │
+│  • Review → Fix → Re-review → Auto-merge pipeline       │
 │  • Retries failed workers (configurable, default 2)      │
-│  • Rich terminal dashboard with live status              │
+│  • Enforces file scope (workers can't modify unlisted)   │
+│  • Rich dashboard with timing + cost tracking            │
+│  • Dry-run mode to preview execution plan                │
 │  • Targets any repo via --repo-path                      │
+│  • Task decomposition for vague issues (--decompose)     │
+│  • Conflict resolution before marking tasks failed       │
 └──────┬──────────────┬──────────────┬─────────────────────┘
        │              │              │
        ▼              ▼              ▼
@@ -59,22 +62,21 @@
 ## Repo Strategy
 
 ```
-agent-shop-testbed/agent-shop/   ← Stable copy of orchestrator (run from here)
+agent-shop-testbed/agent-shop/   ← Stable copy (run orchestrator from here)
               ↓ targets ↓
 agent-shop/                      ← Self-improving tool (agents modify this)
               ↓ targets ↓
-our-caring-circle/               ← Production app (future)
+our-caring-circle/               ← Production app (next target)
 ```
 
-**Why two repos?**
-- **agent-shop** is the tool itself — agents improve it by working on its own issues
-- **agent-shop-testbed** holds a stable copy used to run the orchestrator with the dashboard
-- Running the orchestrator from testbed targeting agent-shop prevents agents from breaking the tool mid-run
-- Once improvements are merged and stable in agent-shop, sync the code back to testbed
+**Sync after improvements:**
+```bash
+cd ~/code/personal/agent-shop
+bash sync.sh  # copies code to testbed
+```
 
 **Running:**
 ```bash
-# From testbed (stable), targeting agent-shop (self-improvement)
 cd ~/code/personal/agent-shop-testbed
 source agent-shop/.venv/bin/activate
 CLAUDECODE= python agent-shop/orchestrator.py \
@@ -82,198 +84,41 @@ CLAUDECODE= python agent-shop/orchestrator.py \
   --repo-path ~/code/personal/agent-shop \
   --log-dir agent-shop/logs \
   --max-workers 2
-
-# From testbed, targeting any other repo
-CLAUDECODE= python agent-shop/orchestrator.py \
-  --source issues \
-  --repo-path ~/code/personal/our-caring-circle \
-  --log-dir agent-shop/logs \
-  --max-workers 2
 ```
 
 ---
 
-## Pipeline Flow
+## Module Inventory
 
-```
-GitHub Issue (agent-ready) → Worker → PR → Review → Fix (if needed) → Merge → Issue Closed
-```
+| Module | Purpose | Added |
+|--------|---------|-------|
+| `orchestrator.py` | Main async loop — spawns workers, manages state, dashboard | Phase 2 |
+| `worker.py` | Claude Code headless worker with worktree isolation | Phase 1 |
+| `reviewer.py` | Code review agent — reads diffs, posts structured reviews | Phase 3 |
+| `fixer.py` | Fix agent — addresses review feedback with linked commits | Phase 3 |
+| `task_manager.py` | PLAN.yaml parser and dependency resolver | Phase 2 |
+| `issue_source.py` | GitHub Issues as task source | Phase 4 |
+| `decomposer.py` | Task decomposition — breaks vague issues into sub-tasks | Self-improvement R2 |
+| `conflict_resolver.py` | Auto-resolves merge conflicts via Claude | Self-improvement R2 |
+| `sync.sh` | Copies agent-shop code to testbed | Self-improvement R2 |
 
-1. **Issue created** with `agent-ready` label (via template or manually)
-2. **Orchestrator** fetches open `agent-ready` issues, resolves dependencies
-3. **Worker agent** creates isolated git worktree, writes code + tests, commits, pushes, opens PR
-4. **Review agent** reads full diff + file contents, posts structured code review
-5. **Fix agent** (if changes requested) addresses feedback, commits fixes
-6. **Review agent** re-reviews (up to 2 fix cycles)
-7. **Auto-merge** squash merges approved PR, pulls latest main
-8. **Issue closed** with comment linking to merged PR
-9. **Next dependent task** starts from updated main
+### Tests
 
----
-
-## Phase Status
-
-### Phase 1: Foundation ✅ COMPLETE
-
-Single Claude Code worker completing tasks end-to-end.
-
-**What was built:**
-- `worker.py` — Core worker module
-  - Git worktree isolation at `/tmp/agent-worktrees/`
-  - Claude Code headless mode (`claude -p`) with `--dangerously-skip-permissions`
-  - Restricted tool access via `--allowedTools`
-  - Auto-commit fallback if Claude skips git commands
-  - PR creation via `gh pr create`
-  - Automatic worktree cleanup
-  - Per-worker log files
-  - Strips `CLAUDECODE` env var to allow nested sessions
-
-**Key learnings:**
-- `--dangerously-skip-permissions` is required for headless mode
-- Action-oriented prompts work better than verbose task descriptions
-- Model forced to `sonnet` for workers (5x throughput vs Opus)
-- Worker timeout of 600s prevents runaway agents
-- `CLAUDECODE` env var must be stripped for subprocess claude calls
-
-### Phase 2: Orchestrator ✅ COMPLETE
-
-Parallel worker orchestration with dependency resolution.
-
-**What was built:**
-- `orchestrator.py` — Async main loop
-  - `asyncio` + `ThreadPoolExecutor` for parallel worker execution
-  - Dependency resolution (tasks specify `depends_on`)
-  - File conflict detection (tasks specify `files_touched`)
-  - Rich live table showing task status
-  - `status.json` written after every state change
-  - CLI: `--plan`, `--source`, `--label`, `--max-workers`, `--timeout`, `--repo-path`, `--log-dir`, `--max-retries`
-  - Graceful `KeyboardInterrupt` handling
-- `task_manager.py` — PLAN.yaml parser with dependency validation
-
-### Phase 3: Review & Fix Pipeline ✅ COMPLETE
-
-Automated code review with feedback loop.
-
-**What was built:**
-- `reviewer.py` — Code review agent (reads diffs, posts structured reviews)
-- `fixer.py` — Review feedback fixer (addresses comments, pushes fixes)
-- Integrated pipeline: Worker → Review → Fix → Re-review → Merge
-
-**Real example (testbed PR #9):** Review agent found a real bug in a truncate function (negative index issue). Fix agent resolved it. Re-review approved. Auto-merged.
-
-### Phase 4: GitHub Issues as Task Source ✅ COMPLETE
-
-**What was built:**
-- `issue_source.py` — GitHub Issues parser (supports both freeform and template format)
-- `.github/ISSUE_TEMPLATE/agent-task.yml` — Structured issue template
-- Labels: `agent-ready`, `agent-failed`, `agent-created`, `priority:1-3`
-
-### Phase 5: Self-Improvement ✅ COMPLETE
-
-The agent-shop repo successfully improved itself by processing its own issues.
-
-**Self-improvement cycle (agent-shop repo):**
-
-| Issue | Title | PR | Result |
-|-------|-------|----|--------|
-| #1 | Add retry logic for worker failures | #7 | Merged ✅ |
-| #2 | Add GitHub Actions CI pipeline | #5 | Merged ✅ |
-| #3 | Fix orchestrator --repo-path for external repos | #8 | Merged ✅ (conflict resolved) |
-| #4 | Add unit tests for task_manager and issue_source | #6 | Merged ✅ |
-
-**What was added:**
-- Retry logic with configurable max retries, branch cleanup between attempts
-- GitHub Actions CI with ruff lint + pytest on all PRs
-- `--repo-path` and `--log-dir` for targeting external repos
-- Unit tests for task_manager and issue_source
-- `CLAUDECODE` env var stripping in worker, reviewer, and fixer
-
-**Bug discovered:** Claude Code sets a `CLAUDECODE` env var that prevents nested sessions. All subprocess calls that invoke `claude` must strip this variable from the environment.
+| Test File | Covers |
+|-----------|--------|
+| `tests/test_task_manager.py` | PLAN.yaml parsing, dependency resolution, ready task filtering |
+| `tests/test_issue_source.py` | Issue body parsing, file extraction, depends_on, max_turns |
+| `tests/test_worker.py` | File scope enforcement |
+| `tests/test_orchestrator_paths.py` | --repo-path and --log-dir behavior, decompose integration |
+| `tests/test_orchestrator_timing.py` | Duration tracking, cost tracking, summary stats |
+| `tests/test_dry_run.py` | Dry-run mode output |
+| `tests/test_conflict_resolver.py` | Conflict detection, resolution, error handling |
+| `tests/test_decomposer.py` | Task decomposition, sub-issue creation, error handling |
+| `test_retry.py` | Retry logic, branch cleanup, suffix handling |
 
 ---
 
-## File Structure
-
-### agent-shop (standalone tool)
-
-```
-agent-shop/
-├── orchestrator.py             # Main loop — spawns workers, manages state
-├── worker.py                   # Claude Code headless worker
-├── reviewer.py                 # Code review agent
-├── fixer.py                    # Review feedback fixer
-├── task_manager.py             # PLAN.yaml parser + dependency resolver
-├── issue_source.py             # GitHub Issues as task source
-├── CLAUDE.md                   # Context for Claude Code sessions
-├── status.json                 # Live orchestration state
-├── logs/                       # Per-worker execution logs
-├── tests/                      # Unit tests
-│   ├── test_task_manager.py
-│   ├── test_issue_source.py
-│   └── test_orchestrator_paths.py
-├── .github/
-│   ├── ISSUE_TEMPLATE/
-│   │   └── agent-task.yml
-│   └── workflows/
-│       └── ci.yml              # Ruff + pytest on PRs
-├── requirements-dev.txt        # pytest, ruff, pytest-mock
-└── .venv/                      # Python virtual environment
-```
-
-### agent-shop-testbed (test playground + stable runner)
-
-```
-agent-shop-testbed/
-├── agent-shop/                 # Stable copy of orchestrator (synced from agent-shop)
-│   ├── orchestrator.py
-│   ├── worker.py
-│   ├── reviewer.py
-│   ├── fixer.py
-│   ├── task_manager.py
-│   ├── issue_source.py
-│   ├── .venv/
-│   └── logs/
-├── src/                        # Test application code (built by agents)
-├── tests/                      # Test suite (built by agents)
-├── PLAN.yaml                   # Task definitions
-├── .github/ISSUE_TEMPLATE/
-│   └── agent-task.yml
-└── IMPLEMENTATION.md           # This document
-```
-
----
-
-## Usage
-
-### Self-Improvement (agent-shop works on itself)
-
-```bash
-cd ~/code/personal/agent-shop-testbed
-source agent-shop/.venv/bin/activate
-CLAUDECODE= python agent-shop/orchestrator.py \
-  --source issues \
-  --repo-path ~/code/personal/agent-shop \
-  --log-dir agent-shop/logs \
-  --max-workers 2 --timeout 600
-```
-
-### Target Any Repo
-
-```bash
-CLAUDECODE= python agent-shop/orchestrator.py \
-  --source issues \
-  --repo-path ~/code/personal/our-caring-circle \
-  --log-dir agent-shop/logs \
-  --max-workers 2
-```
-
-### From PLAN.yaml
-
-```bash
-CLAUDECODE= python agent-shop/orchestrator.py --plan PLAN.yaml --repo-path ~/code/my-repo
-```
-
-### CLI Options
+## CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -285,105 +130,99 @@ CLAUDECODE= python agent-shop/orchestrator.py --plan PLAN.yaml --repo-path ~/cod
 | `--max-retries` | `2` | Retry attempts for failed workers |
 | `--timeout` | `600` | Per-task timeout (seconds) |
 | `--log-dir` | `./logs` | Directory for worker logs |
-
-### Run Individual Components
-
-```bash
-CLAUDECODE= python reviewer.py --pr 13
-CLAUDECODE= python fixer.py --pr 13
-python issue_source.py
-```
+| `--dry-run` | `False` | Preview execution plan without running |
+| `--decompose` | `False` | Auto-decompose vague issues into sub-tasks |
 
 ---
 
-## Issue Format
+## Build History
 
-Use the built-in template (🤖 Agent Task) or write manually:
+### Phase 1-4: Foundation → Full Pipeline (testbed)
 
-```markdown
-### Description
+Built and proven in agent-shop-testbed:
+- Worker with worktree isolation and Claude Code headless mode
+- Orchestrator with async parallel execution and dependency resolution
+- Review agent that catches real bugs (proven: truncate function negative index)
+- Fix agent that addresses review feedback with linked commits
+- GitHub Issues as task source with template support
+- Auto-merge pipeline: Worker → Review → Fix → Re-review → Merge → Close Issue
 
-Add a `foo(x: int) -> str` function to src/bar.py that...
+### Self-Improvement Round 1 (agent-shop issues #1-4)
 
-### Files
+Agents improved themselves — orchestrator ran from testbed targeting agent-shop:
 
-- src/bar.py
-- tests/test_bar.py
+| Issue | Title | PR | Status |
+|-------|-------|----|--------|
+| #1 | Retry logic for worker failures | #7 | ✅ Merged |
+| #2 | GitHub Actions CI pipeline | #5 | ✅ Merged |
+| #3 | External repo targeting (--repo-path) | #8 | ✅ Merged (conflict resolved) |
+| #4 | Unit tests for task_manager and issue_source | #6 | ✅ Merged |
 
-### Depends on
+**Bug discovered:** `CLAUDECODE` env var blocks nested Claude sessions. Fixed in worker, reviewer, and fixer.
 
-#5, #6
+### Self-Improvement Round 2 (agent-shop issues #9-15)
 
-### Max turns
+| Issue | Title | PR | Status | Notes |
+|-------|-------|----|--------|-------|
+| #9 | File scope enforcement | #17 | ✅ Merged | Workers can't modify unlisted files |
+| #10 | Sync script | #19 | ✅ Merged | `bash sync.sh` copies to testbed |
+| #11 | Dry-run mode | #21 | ✅ Merged | `--dry-run` previews execution plan |
+| #12 | Review agent quality | #16 | ✅ Merged | Fewer false positive REQUEST_CHANGES |
+| #13 | Dashboard timing + cost | #18 | ✅ Merged | Duration and cost columns in dashboard |
+| #14 | Task decomposition agent | #23 | ✅ Merged | `--decompose` breaks vague issues into sub-tasks |
+| #15 | Conflict resolution agent | #22 | ✅ Merged | Auto-resolves merge conflicts via Claude |
 
-40
-```
-
-Priority set via labels: `priority:1` (high), `priority:2` (medium), `priority:3` (low).
-
----
-
-## Cost Management
-
-**Primary: Max 5x Subscription ($100/mo)** — all agents included, no extra cost. Workers default to `sonnet` model.
-
-**Note:** The `CLAUDECODE=` prefix is required when launching from a Claude Code session. In a plain terminal it's harmless.
-
----
-
-## Complete PR History
-
-### agent-shop-testbed (test playground)
-
-| PR | Title | Source | Review | Status |
-|----|-------|--------|--------|--------|
-| #1 | Add multiply function | Manual test | N/A | Merged |
-| #2 | Add subtract function | Worker test | N/A | Merged |
-| #3 | Add divide function | PLAN.yaml | N/A | Merged |
-| #6 | Add power function | PLAN.yaml | N/A | Merged |
-| #8 | Add Calculator class | PLAN.yaml | Approved | Merged |
-| #9 | Add string utilities | PLAN.yaml | REQUEST_CHANGES → Fixed → Approved | Merged |
-| #11 | Add statistics module | Issue #10 | Approved + auto-merged | Merged |
-| #13 | Add conversion utilities | Issue #12 | Approved + auto-merged | Merged |
-
-### agent-shop (self-improvement)
-
-| PR | Title | Issue | Review | Status |
-|----|-------|-------|--------|--------|
-| #5 | Add GitHub Actions CI pipeline | #2 | N/A (manual) | Merged |
-| #6 | Add unit tests for task_manager and issue_source | #4 | Approved (4 suggestions) | Merged |
-| #7 | Add retry logic for worker failures | #1 | REQUEST_CHANGES (3 comments) | Merged |
-| #8 | Fix orchestrator --repo-path for external repos | #3 | N/A (conflict resolved manually) | Merged |
+**4 completed by orchestrator automatically, 3 failed review/merge (merge conflicts from parallel PRs). All 3 rescued via manual review + rebase + merge.**
 
 ---
 
-## Known Issues & Lessons Learned
+## Open Issues
 
-- **CLAUDECODE nesting** — Claude Code sets env var blocking nested sessions. All subprocess `claude` calls strip it.
-- **Review comments are PR-level** — GitHub API doesn't allow self-approval, so reviews are posted as comments with `[REVIEW: APPROVE/REQUEST_CHANGES]` tags.
-- **Merge conflicts on parallel PRs** — When two PRs modify the same file, the second needs manual rebase. Orchestrator mitigates this by merging sequentially and pulling main between tasks.
-- **PR #5 scope creep** — CI pipeline issue caused the agent to also ruff-fix all Python files. Issue descriptions should specify "ONLY modify the listed files."
+| Issue | Title | Priority |
+|-------|-------|----------|
+| #20 | Post-work rebase step before pushing | 1 |
 
 ---
 
-## Future Work
+## Next Issues to Create
 
-### Near Term
-- [ ] **Rate limiter** — track subscription usage, switch to API when near limit
-- [ ] **Branch protection** — require PR + CI checks on main
-- [ ] **Sync script** — automate copying agent-shop code to testbed
-- [ ] **Stricter file scope** — enforce "only touch listed files" in worker prompt
+### High Priority — Needed for our-caring-circle
 
-### Medium Term
-- [ ] **Task decomposition agent** — Claude breaks vague issues into scoped sub-tasks
-- [ ] **Conflict resolution agent** — auto-resolve merge conflicts via Claude
-- [ ] **API key fallback** — overnight batch runs when subscription is exhausted
+- **CLAUDE.md generator** — auto-generate a CLAUDE.md for target repos by analyzing the codebase (tech stack, conventions, test framework)
+- **Better error messages on review/merge failure** — currently just "Review/fix/merge cycle failed" with no detail. Log the actual exception/stderr to the issue comment
+- **PR conflict detection before merge** — check `gh pr view --json mergeable` before attempting `gh pr merge`, run conflict_resolver if not mergeable
+- **Priority batching** — complete all priority:1 tasks and merge them before starting priority:2
 
-### Long Term
-- [ ] **Deploy to our-caring-circle** — production use on family care app
-- [ ] **Agent Teams integration** — use Claude Code native Agent Teams as workers
-- [ ] **Dashboard web UI** — real-time monitoring beyond the terminal
-- [ ] **GitHub Actions trigger** — run orchestrator on issue label events
+### Medium Priority — Quality of Life
+
+- **Worker prompt customization** — allow CLAUDE.md or per-task prompt overrides for different repos
+- **Cost reporting** — aggregate prompt costs per run and per task in final summary
+- **Notification on completion** — desktop notification or webhook when orchestrator finishes
+- **Smarter review agent** — pass CLAUDE.md context to reviewer so it understands project conventions
+
+### Lower Priority — Future Vision
+
+- **Web dashboard** — real-time monitoring UI instead of terminal
+- **GitHub Actions trigger** — run orchestrator when issues are labeled agent-ready
+- **Multi-repo orchestration** — process issues across multiple repos in one run
+- **Agent Teams integration** — use Claude Code native Agent Teams as workers
+- **Prompt caching** — reuse review prompts for re-reviews to save tokens
+
+---
+
+## Known Issues & Lessons
+
+1. **CLAUDECODE nesting** — Claude Code sets env var blocking nested sessions. All subprocess `claude` calls strip it. Use `CLAUDECODE=` prefix when launching from Claude Code terminal.
+
+2. **Merge conflicts from parallel PRs** — When 2+ workers modify the same file (e.g., orchestrator.py), the second PR will have conflicts. Mitigations: file conflict detection, post-work rebase (issue #20), conflict resolver agent.
+
+3. **Review/merge failure reporting** — The orchestrator logs "Review/fix/merge cycle failed" but doesn't surface the actual error to the issue comment.
+
+4. **PR scope creep** — Workers sometimes modify files beyond what the issue requested. Fixed by file scope enforcement (issue #9).
+
+5. **GitHub merge after rebase** — Sometimes `gh pr merge` fails after a local rebase + force push. Workaround: `gh pr checkout N && git merge origin/main && git push`.
+
+6. **Review is sequential** — Reviews run one at a time even when multiple PRs are ready. This is a bottleneck when many tasks complete simultaneously.
 
 ---
 
@@ -394,11 +233,20 @@ Priority set via labels: `priority:1` (high), `priority:2` (medium), `priority:3
 - [x] Python 3.12 with venv
 - [x] Dependencies: pyyaml, rich, gitpython
 - [x] agent-shop repo with labels
-- [x] agent-shop-testbed repo with labels
+- [x] agent-shop-testbed repo (stable runner)
 - [x] Max 5x subscription active
-- [x] GitHub Actions CI on agent-shop
-- [x] Unit tests for core modules
-- [x] Retry logic implemented
-- [x] External repo targeting (--repo-path)
-- [ ] Branch protection rules on main
-- [ ] Anthropic API key (for future overflow usage)
+- [x] GitHub Actions CI
+- [x] Unit tests for all core modules
+- [x] Retry logic
+- [x] External repo targeting
+- [x] File scope enforcement
+- [x] Dry-run mode
+- [x] Dashboard timing and cost tracking
+- [x] Task decomposition agent
+- [x] Conflict resolution agent
+- [x] Sync script
+- [x] Review agent quality improvements
+- [ ] Post-work rebase (issue #20)
+- [ ] Priority batching
+- [ ] Better error reporting
+- [ ] Branch protection rules
