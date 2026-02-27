@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 TESTBED_PATH="${1:-$HOME/code/personal/agent-shop-testbed/agent-shop/}"
 
-FILES=(
-    orchestrator.py
-    worker.py
-    reviewer.py
-    fixer.py
-    issue_source.py
-    task_manager.py
-)
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -d "$TESTBED_PATH" ]]; then
+  echo "Error: destination '$TESTBED_PATH' does not exist" >&2
+  exit 1
+fi
 
 echo "Syncing to: $TESTBED_PATH"
-
-for file in "${FILES[@]}"; do
-    cp "$SCRIPT_DIR/$file" "$TESTBED_PATH/$file"
-    echo "  Copied $file"
+count=0
+for f in *.py; do
+  cp "$f" "$TESTBED_PATH"
+  echo "  Copied $f"
+  count=$((count + 1))
 done
 
-echo ""
-echo "Done. Remember to commit and push in the testbed repo:"
-echo "  cd $TESTBED_PATH && git add -A && git commit -m 'sync: update agent-shop files' && git push"
+cp sync.sh "$TESTBED_PATH" 2>/dev/null && echo "  Copied sync.sh" && count=$((count + 1))
+
+echo "Done. $count files copied."
+echo "Remember to commit and push in the testbed repo."
