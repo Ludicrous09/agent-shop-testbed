@@ -16,6 +16,7 @@ from task_manager import load_tasks, get_ready_tasks
 from worker import Worker, WorkerResult
 from reviewer import ReviewAgent
 from fixer import FixAgent
+from issue_source import IssueSource
 
 from rich.console import Console
 from rich.live import Live
@@ -245,12 +246,20 @@ async def orchestrate(
     max_workers: int,
     repo_path: str,
     timeout: int,
+    source: str = "plan",
+    label: str = "agent-ready",
 ) -> None:
     repo = Path(repo_path).resolve()
     status_path = repo / "agent-shop" / "status.json"
 
-    log.info("Loading plan from %s", plan_path)
-    tasks = load_tasks(plan_path)
+    if source == "issues":
+        log.info("Fetching tasks from GitHub Issues (label=%s)", label)
+        issue_source = IssueSource(repo_path=repo, label=label)
+        tasks = issue_source.fetch_tasks()
+    else:
+        log.info("Loading plan from %s", plan_path)
+        tasks = load_tasks(plan_path)
+        issue_source = None
     log.info("Loaded %d tasks", len(tasks))
 
     state = OrchestratorState(tasks, repo, timeout)
@@ -307,9 +316,21 @@ async def orchestrate(
                     if merged:
                         state.completed_ids.add(task_id)
                         log.info("Task %s merged successfully", task_id)
+                        # Close GitHub issue if using issues source
+                        if issue_source and task_id.startswith("issue-"):
+                            pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
+                            try:
+                                issue_source.mark_complete(task_id, pr_url or "N/A")
+                            except Exception as exc:
+                                log.warning("Failed to close issue for %s: %s", task_id, exc)
                     else:
                         state.failed_ids.add(task_id)
                         log.error("Task %s failed review/fix/merge cycle", task_id)
+                        if issue_source and task_id.startswith("issue-"):
+                            try:
+                                issue_source.mark_failed(task_id, "Review/fix/merge cycle failed")
+                            except Exception as exc:
+                                log.warning("Failed to mark issue failed for %s: %s", task_id, exc)
                 except Exception as exc:
                     state.failed_ids.add(task_id)
                     log.error("Task %s review pipeline raised: %s", task_id, exc)
@@ -335,7 +356,10 @@ async def orchestrate(
             # Filter out already-active and failed tasks
             ready = [
                 t for t in ready
-                if t.id not in state.active_workers and t.id not in state.failed_ids
+                if t.id not in state.active_workers
+                and t.id not in state.failed_ids
+                and t.id not in state.review_futures
+                and t.id not in state.completed_ids
             ]
 
             slots = max_workers - state.active
@@ -387,6 +411,17 @@ def main() -> None:
         help="Path to the git repo (default: cwd)",
     )
     parser.add_argument(
+        "--source",
+        choices=["plan", "issues"],
+        default="plan",
+        help="Task source: 'plan' for PLAN.yaml, 'issues' for GitHub Issues (default: plan)",
+    )
+    parser.add_argument(
+        "--label",
+        default="agent-ready",
+        help="GitHub Issues label to use as task source (default: agent-ready)",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=600,
@@ -406,6 +441,8 @@ def main() -> None:
             max_workers=args.max_workers,
             repo_path=args.repo_path,
             timeout=args.timeout,
+            source=args.source,
+            label=args.label,
         ))
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted![/bold red] Cancelling active workers…")
