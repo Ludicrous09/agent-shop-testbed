@@ -1,7 +1,7 @@
 """Tests for utility functions."""
 import pytest
 
-from src.utils import add, divide, multiply, subtract
+from src.utils import add, divide, multiply, power, subtract
 
 
 def test_add():
@@ -75,3 +75,29 @@ def test_divide_by_zero():
         divide(0, 0)
     with pytest.raises(ZeroDivisionError):
         divide(-5, 0)
+
+
+def test_power_positive_exponents():
+    assert power(2, 3) == 8
+    assert power(3, 4) == 81
+    assert power(5, 2) == 25
+    assert power(10, 6) == 1000000
+
+
+def test_power_exponent_zero():
+    assert power(2, 0) == 1
+    assert power(0, 0) == 1
+    assert power(-5, 0) == 1
+    assert power(100, 0) == 1
+
+
+def test_power_negative_base_even_exponent():
+    assert power(-2, 2) == 4
+    assert power(-3, 4) == 81
+    assert power(-5, 2) == 25
+
+
+def test_power_negative_base_odd_exponent():
+    assert power(-2, 3) == -8
+    assert power(-3, 1) == -3
+    assert power(-5, 3) == -125
