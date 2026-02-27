@@ -57,12 +57,16 @@ def _parse_files(body: str) -> list[str]:
     # or next section header (a line that is not a bullet and not blank).
     after = body[match.end():]
     lines: list[str] = []
+    found_item = False
     for line in after.splitlines():
         if not line.strip():
-            break
+            if found_item:
+                break  # blank line after items = end of section
+            continue  # skip blank lines before first item
         m = _FILES_ITEM.match(line)
         if m:
             lines.append(m.group(1).strip())
+            found_item = True
         else:
             break
     return lines
