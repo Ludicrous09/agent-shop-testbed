@@ -1,0 +1,54 @@
+name: "🤖 Agent Task"
+description: "Create a task for the agent to work on"
+labels: ["agent-ready"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: "Describe what the agent should build or change. Be specific about function signatures, behavior, and edge cases."
+      placeholder: |
+        Add a `foo(x: int) -> str` function to src/bar.py that...
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: "List the files that will be created or modified (one per line, prefixed with -)"
+      placeholder: |
+        - src/bar.py
+        - tests/test_bar.py
+    validations:
+      required: false
+
+  - type: input
+    id: depends_on
+    attributes:
+      label: Depends on
+      description: "Issue numbers this depends on (comma-separated)"
+      placeholder: "#1, #2"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "1 - High"
+        - "2 - Medium"
+        - "3 - Low"
+      default: 1
+    validations:
+      required: false
+
+  - type: input
+    id: max_turns
+    attributes:
+      label: Max turns
+      description: "Maximum Claude turns (default 50)"
+      placeholder: "50"
+    validations:
+      required: false
