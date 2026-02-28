@@ -25,6 +25,7 @@ priority; the default is 1.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -33,6 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from worker import Task
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +142,31 @@ class IssueSource:
     def fetch_tasks(self) -> list[Task]:
         """Fetch open issues with the configured label and return Tasks.
 
+        Before adding each issue as a task, checks whether a merged PR already
+        references it.  If so, the issue is auto-closed (with a comment) and
+        the task is skipped to prevent duplicate work.
+
         Dependencies that reference issue numbers not in the fetched set are
         silently dropped.  Results are sorted by priority (lowest = highest).
         """
         issues = self._gh_list_issues()
-        all_numbers: set[int] = {iss["number"] for iss in issues}
-        tasks = [_issue_to_task(iss, all_numbers) for iss in issues]
+        # Filter out issues already resolved by merged PRs first, so that
+        # all_numbers only contains issues that will actually become tasks.
+        # This prevents depends_on from referencing tasks that don't exist.
+        accepted: list[dict] = []
+        for iss in issues:
+            number: int = iss["number"]
+            pr_number = self._find_merged_pr(number)
+            if pr_number is not None:
+                log.info("Skipping issue #%d — already resolved by PR #%d", number, pr_number)
+                try:
+                    self._close_already_resolved(number, pr_number)
+                except RuntimeError as exc:
+                    log.warning("Failed to close already-resolved issue #%d: %s", number, exc)
+            else:
+                accepted.append(iss)
+        all_numbers: set[int] = {iss["number"] for iss in accepted}
+        tasks = [_issue_to_task(iss, all_numbers) for iss in accepted]
         tasks.sort(key=lambda t: t.priority)
         return tasks
 
@@ -197,6 +219,44 @@ class IssueSource:
             "--json", "number,title,body,labels",
         ])
         return json.loads(result.stdout)
+
+    def _find_merged_pr(self, number: int) -> int | None:
+        """Return the PR number of a merged PR whose title references this issue, or None.
+
+        Uses ``gh pr list --state merged --search 'issue-{number} in:title'``.
+        Returns ``None`` if no such PR is found or if the gh call fails.
+        """
+        try:
+            result = self._gh([
+                "pr", "list",
+                "--state", "merged",
+                "--search", f"issue-{number} in:title",
+                "--limit", "5",
+                "--json", "number,state,title",
+            ])
+        except RuntimeError as exc:
+            log.warning("_find_merged_pr gh call failed for issue #%d: %s", number, exc)
+            return None
+        try:
+            prs = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        # GitHub's search is a substring match, so 'issue-1' can return PRs
+        # titled 'Fix issue-10', 'Fix issue-100', etc.  Validate that the
+        # title contains 'issue-{number}' as a whole token before accepting.
+        pattern = re.compile(rf"\bissue-{number}\b", re.IGNORECASE)
+        for pr in prs:
+            # --state merged guarantees every returned PR is merged; kept as a
+            # defensive guard in case the API behaviour ever changes.
+            if pr.get("state") == "MERGED" and pattern.search(pr.get("title", "")):
+                return int(pr["number"])
+        return None
+
+    def _close_already_resolved(self, number: int, pr_number: int) -> None:
+        """Comment on, remove the agent-ready label from, and close an issue."""
+        self._gh_comment(number, f"Issue already resolved by merged PR #{pr_number}")
+        self._gh(["issue", "edit", str(number), "--remove-label", self.label])
+        self._gh(["issue", "close", str(number)])
 
     def _gh_comment(self, number: int, body: str) -> None:
         self._gh(["issue", "comment", str(number), "--body", body], timeout=120)
