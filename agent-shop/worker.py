@@ -11,6 +11,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_LARGE_PROMPT_THRESHOLD = 100 * 1024  # 100 KB
+
 
 class WorkerError(Exception):
     """Raised when a worker encounters an unrecoverable error."""
@@ -151,20 +153,39 @@ class Worker:
 
     def _run_claude(self) -> tuple[str, dict | None]:
         prompt = self._build_prompt()
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--model",
-            self.task.model,
-            "--max-turns",
-            str(self.task.max_turns),
-            "--allowedTools",
-            "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
-            "--dangerously-skip-permissions",
-        ]
+        use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
+
+        if use_stdin:
+            cmd = [
+                "claude",
+                "--output-format",
+                "json",
+                "--model",
+                self.task.model,
+                "--max-turns",
+                str(self.task.max_turns),
+                "--allowedTools",
+                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input: str | None = prompt
+        else:
+            cmd = [
+                "claude",
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--model",
+                self.task.model,
+                "--max-turns",
+                str(self.task.max_turns),
+                "--allowedTools",
+                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input = None
+
         logger.info(
             "Running claude for task %s (timeout=%ds)", self.task.id, self.timeout
         )
@@ -179,6 +200,7 @@ class Worker:
                 text=True,
                 timeout=self.timeout,
                 env=env,
+                input=stdin_input,
             )
         except subprocess.TimeoutExpired as e:
             raise WorkerError(f"Claude timed out after {self.timeout}s") from e
@@ -265,7 +287,13 @@ class Worker:
         )
         self._log(f"Reverting unauthorized files: {sorted(unauthorized)}")
 
+        worktree_resolved = str(self.worktree_path.resolve())
         for filepath in sorted(unauthorized):
+            # Guard against path traversal attacks from git output
+            full_path = (self.worktree_path / filepath).resolve()
+            if not str(full_path).startswith(worktree_resolved):
+                logger.warning("Path traversal blocked: %s", filepath)
+                continue
             # Check whether the file exists in main
             cat_file = subprocess.run(
                 ["git", "cat-file", "-e", f"main:{filepath}"],
@@ -293,7 +321,6 @@ class Worker:
                     )
             else:
                 # File is new (not in main) — delete it from disk and index
-                full_path = self.worktree_path / filepath
                 try:
                     full_path.unlink(missing_ok=True)
                 except OSError as exc:
@@ -474,20 +501,38 @@ class Worker:
             "2. Complete the merge with: git commit --no-edit\n"
         )
 
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--model",
-            self.task.model,
-            "--max-turns",
-            "10",
-            "--allowedTools",
-            "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
-            "--dangerously-skip-permissions",
-        ]
+        use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
+
+        if use_stdin:
+            cmd = [
+                "claude",
+                "--output-format",
+                "json",
+                "--model",
+                self.task.model,
+                "--max-turns",
+                "10",
+                "--allowedTools",
+                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input: str | None = prompt
+        else:
+            cmd = [
+                "claude",
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--model",
+                self.task.model,
+                "--max-turns",
+                "10",
+                "--allowedTools",
+                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input = None
 
         logger.info(
             "Running Claude to resolve conflicts for task %s", self.task.id
@@ -502,6 +547,7 @@ class Worker:
             text=True,
             timeout=self.timeout,
             env=env,
+            input=stdin_input,
         )
 
         if proc.returncode != 0:

@@ -319,15 +319,21 @@ class DecomposerAgent:
             "--add-label", self.DECOMPOSED_LABEL,
         ])
 
-    def _gh(self, args: list[str]) -> subprocess.CompletedProcess:
+    def _gh(self, args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising on non-zero exit."""
         cmd = ["gh"] + args
-        result = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"gh command timed out after {timeout}s: {' '.join(cmd)}"
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(
                 f"gh command failed ({result.returncode}): "

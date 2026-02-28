@@ -12,6 +12,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 WORKTREE_BASE = Path("/tmp/agent-worktrees")
+_LARGE_PROMPT_THRESHOLD = 100 * 1024  # 100 KB
 
 def _build_resolve_prompt(
     pr_description: str, main_changes: str, file_path: str, conflicted_content: str
@@ -348,16 +349,31 @@ class ConflictResolver:
         return text
 
     def _run_claude(self, prompt: str) -> str:
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--dangerously-skip-permissions",
-            "--output-format",
-            "json",
-            "--model",
-            self.model,
-        ]
+        use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
+
+        if use_stdin:
+            cmd = [
+                "claude",
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+                "--model",
+                self.model,
+            ]
+            stdin_input: str | None = prompt
+        else:
+            cmd = [
+                "claude",
+                "-p",
+                prompt,
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+                "--model",
+                self.model,
+            ]
+            stdin_input = None
+
         logger.info("Running claude for conflict resolution (timeout=%ds)", self.timeout)
         try:
             env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -368,6 +384,7 @@ class ConflictResolver:
                 text=True,
                 timeout=self.timeout,
                 env=env,
+                input=stdin_input,
             )
         except subprocess.TimeoutExpired as exc:
             raise ConflictError(f"Claude timed out after {self.timeout}s") from exc
@@ -438,6 +455,7 @@ class ConflictResolver:
             cwd=self.repo_path,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if proc.returncode != 0:
             logger.warning(
@@ -469,12 +487,18 @@ class ConflictResolver:
 
     def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh"] + args
-        proc = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ConflictError(
+                f"gh {' '.join(args)} timed out after {self.timeout}s"
+            ) from exc
         if proc.returncode != 0:
             raise ConflictError(
                 f"gh {' '.join(args)} failed (code {proc.returncode}): {proc.stderr[:500]}"

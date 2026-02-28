@@ -12,6 +12,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_VALID_SEVERITIES = {"error", "warning", "suggestion"}
+
 REVIEW_PROMPT_TEMPLATE = """\
 You are a thorough but fair code reviewer. Review the following pull request and respond with ONLY a JSON object (no markdown fences, no prose before or after).
 
@@ -302,6 +304,13 @@ class ReviewAgent:
         # Enforce threshold: REQUEST_CHANGES only if at least one comment is severity "error".
         # This overrides the model's verdict to prevent false positives from style suggestions.
         comments = data.get("comments", [])
+        for c in comments:
+            if c.get("severity") not in _VALID_SEVERITIES:
+                logger.warning(
+                    "Invalid severity %r in review comment — defaulting to 'suggestion'",
+                    c.get("severity"),
+                )
+                c["severity"] = "suggestion"
         has_error = any(c.get("severity") == "error" for c in comments)
         if verdict == "request_changes" and not has_error:
             logger.info(

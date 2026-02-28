@@ -152,7 +152,7 @@ class IssueSource:
         """Post a completion comment and close the issue."""
         number = self._number_from_id(task_id)
         self._gh_comment(number, f"Completed. PR: {pr_url}")
-        self._gh(["issue", "close", str(number)])
+        self._gh(["issue", "close", str(number)], timeout=120)
 
     def mark_failed(self, task_id: str, error: str) -> None:
         """Post an error comment and add the 'agent-failed' label.
@@ -161,21 +161,27 @@ class IssueSource:
         """
         number = self._number_from_id(task_id)
         self._gh_comment(number, f"Agent failed.\n\n```\n{error}\n```")
-        self._gh(["issue", "edit", str(number), "--add-label", "agent-failed"])
+        self._gh(["issue", "edit", str(number), "--add-label", "agent-failed"], timeout=120)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _gh(self, args: list[str]) -> subprocess.CompletedProcess:
+    def _gh(self, args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising on non-zero exit."""
         cmd = ["gh"] + args
-        result = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"gh command timed out after {timeout}s: {' '.join(cmd)}"
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(
                 f"gh command failed ({result.returncode}): "
@@ -193,7 +199,7 @@ class IssueSource:
         return json.loads(result.stdout)
 
     def _gh_comment(self, number: int, body: str) -> None:
-        self._gh(["issue", "comment", str(number), "--body", body])
+        self._gh(["issue", "comment", str(number), "--body", body], timeout=120)
 
     @staticmethod
     def _number_from_id(task_id: str) -> int:

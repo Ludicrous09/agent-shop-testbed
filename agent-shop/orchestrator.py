@@ -31,6 +31,8 @@ from rich.table import Table
 log = logging.getLogger("orchestrator")
 console = Console()
 
+PROMPTS_PER_TASK = 5
+
 
 # ---------------------------------------------------------------------------
 # Status tracking
@@ -229,8 +231,8 @@ def build_table(state: OrchestratorState) -> Table:
         else ""
     )
     table.caption = (
-        f"{priority_str}"
-        f"Total: {state.total}  "
+        priority_str
+        + f"Total: {state.total}  "
         f"Active: {state.active}  "
         f"Completed: {len(state.completed_ids)}  "
         f"Failed: {len(state.failed_ids)}  "
@@ -255,6 +257,7 @@ def _check_label_exists(repo_path: Path, label_name: str) -> bool:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if proc.returncode != 0:
         return False
@@ -271,6 +274,7 @@ def _ensure_review_followup_label(repo_path: Path) -> None:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if check.returncode == 0:
         try:
@@ -289,6 +293,7 @@ def _ensure_review_followup_label(repo_path: Path) -> None:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if proc.returncode != 0:
         log.warning("Failed to create review-followup label: %s", proc.stderr[:300])
@@ -344,6 +349,7 @@ def _create_followup_issues(
             cwd=repo_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         if search_proc.returncode == 0:
             try:
@@ -381,6 +387,7 @@ def _create_followup_issues(
             cwd=repo_path,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if create_proc.returncode != 0:
             log.warning(
@@ -436,11 +443,48 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
+                if mergeable_proc.returncode != 0:
+                    log.error(
+                        "PR #%d mergeability check failed (gh command error): %s",
+                        pr,
+                        mergeable_proc.stderr.strip(),
+                    )
+                    error_msg = (
+                        f"**Merge step failed** for {pr_url}\n\n"
+                        f"gh command failed: {mergeable_proc.stderr.strip()}"
+                    )
+                    return False, error_msg
                 mergeable = mergeable_proc.stdout.strip()
                 log.info("PR #%d mergeability: %s", pr, mergeable)
 
-                if mergeable in ("CONFLICTING", "UNKNOWN"):
+                for _retry in range(3):
+                    if mergeable != "UNKNOWN":
+                        break
+                    log.info("PR #%d mergeability UNKNOWN, retrying (%d/3)...", pr, _retry + 1)
+                    time.sleep(5)
+                    retry_unknown_proc = subprocess.run(
+                        ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if retry_unknown_proc.returncode != 0:
+                        log.warning(
+                            "PR #%d mergeability retry failed (gh error): %s",
+                            pr,
+                            retry_unknown_proc.stderr.strip(),
+                        )
+                        break
+                    mergeable = retry_unknown_proc.stdout.strip()
+                    log.info("PR #%d mergeability: %s", pr, mergeable)
+
+                if mergeable == "UNKNOWN":
+                    mergeable = "CONFLICTING"
+
+                if mergeable == "CONFLICTING":
                     log.info(
                         "PR #%d is %s — attempting automatic conflict resolution",
                         pr,
@@ -461,7 +505,20 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            timeout=60,
                         )
+                        if retry_mergeable_proc.returncode != 0:
+                            log.error(
+                                "PR #%d post-resolution mergeability check failed: %s",
+                                pr,
+                                retry_mergeable_proc.stderr.strip(),
+                            )
+                            error_msg = (
+                                f"**Merge step failed** for {pr_url}\n\n"
+                                f"gh command failed after conflict resolution: "
+                                f"{retry_mergeable_proc.stderr.strip()}"
+                            )
+                            return False, error_msg
                         mergeable = retry_mergeable_proc.stdout.strip()
                         log.info("PR #%d mergeability after resolution: %s", pr, mergeable)
                         if mergeable != "MERGEABLE":
@@ -505,6 +562,7 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    timeout=120,
                 )
                 if proc.returncode != 0:
                     log.error(
@@ -547,6 +605,7 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            timeout=120,
                         )
                         if comment_proc.returncode != 0:
                             log.warning(
@@ -670,9 +729,6 @@ def dry_run_plan(tasks: list[Task], max_workers: int) -> None:
                 wave_tasks.append(task)
                 wave_files.update(task.files_touched)
 
-        if not wave_tasks:
-            break
-
         waves.append(wave_tasks)
         for t in wave_tasks:
             completed.add(t.id)
@@ -716,11 +772,11 @@ def dry_run_plan(tasks: list[Task], max_workers: int) -> None:
         console.print("[dim]No file conflicts detected.[/dim]")
 
     # Estimated prompt usage
-    estimated_prompts = len(tasks) * 5
+    estimated_prompts = len(tasks) * PROMPTS_PER_TASK
     console.print()
     console.print(
         f"[bold]Estimated prompt usage:[/bold] "
-        f"{len(tasks)} tasks × ~5 prompts/task = ~{estimated_prompts} prompts"
+        f"{len(tasks)} tasks × ~{PROMPTS_PER_TASK} prompts/task = ~{estimated_prompts} prompts"
     )
     console.print(f"[bold]Execution waves:[/bold] {len(waves)}")
     console.rule("[bold cyan]End of Dry Run")
