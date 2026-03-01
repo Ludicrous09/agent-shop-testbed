@@ -11,9 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import anthropic
-
 log = logging.getLogger("architect")
+
+_LARGE_PROMPT_THRESHOLD = 100 * 1024  # 100 KB
 
 
 _SYSTEM_PROMPT = """\
@@ -106,7 +106,6 @@ class ArchitectAgent:
     ) -> None:
         self.issue_number = issue_number
         self.repo_path = Path(repo_path).resolve()
-        self._client = anthropic.Anthropic()
 
     # ------------------------------------------------------------------
     # Public API
@@ -285,7 +284,7 @@ class ArchitectAgent:
         return related
 
     def _call_claude(self, issue: dict, file_tree: str, files_content: str) -> str:
-        """Send the issue and codebase context to Claude Opus and return the spec.
+        """Send the issue and codebase context to Claude Opus via CLI and return the spec.
 
         Parameters
         ----------
@@ -304,7 +303,7 @@ class ArchitectAgent:
         Raises
         ------
         RuntimeError
-            When Claude returns a response with no text block.
+            When the claude CLI exits with a non-zero code or returns no text.
         """
         def _esc(s: str) -> str:
             """Escape braces in user-controlled strings so str.format() won't choke."""
@@ -318,27 +317,54 @@ class ArchitectAgent:
             files_content=_esc(files_content),
         )
 
-        # NOTE: no explicit timeout is set on this streaming call. If the
-        # Anthropic API hangs the ThreadPoolExecutor slot will be occupied
-        # indefinitely, potentially stalling the orchestrator from spawning new
-        # workers. A timeout can be configured via the httpx transport on the
-        # Anthropic client or via loop.run_in_executor with a futures timeout.
-        with self._client.messages.stream(
-            model="claude-opus-4-6",
-            max_tokens=8192,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        ) as stream:
-            response = stream.get_final_message()
+        full_prompt = _SYSTEM_PROMPT + "\n\n" + user_msg
 
-        text_block = next(
-            (b for b in response.content if b.type == "text"),
-            None,
+        use_stdin = len(full_prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
+        if use_stdin:
+            cmd = [
+                "claude",
+                "--output-format", "json",
+                "--model", "claude-opus-4-6",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input: str | None = full_prompt
+        else:
+            cmd = [
+                "claude",
+                "-p", full_prompt,
+                "--output-format", "json",
+                "--model", "claude-opus-4-6",
+                "--dangerously-skip-permissions",
+            ]
+            stdin_input = None
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        result = subprocess.run(
+            cmd,
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            input=stdin_input,
         )
-        if text_block is None:
-            raise RuntimeError("Claude response contained no text block")
 
-        return text_block.text.strip()
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"claude command failed ({result.returncode}): {result.stderr[:500]}"
+            )
+
+        # Parse the JSON envelope produced by claude --output-format json
+        try:
+            envelope = json.loads(result.stdout)
+            text = envelope.get("result", result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("Could not parse claude envelope JSON; using raw output")
+            text = result.stdout
+
+        if not text or not text.strip():
+            raise RuntimeError("Claude response contained no text")
+
+        return text.strip()
 
     def _gh(self, args: list[str]) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising ``RuntimeError`` on non-zero exit."""

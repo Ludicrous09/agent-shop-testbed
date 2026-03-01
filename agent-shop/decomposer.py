@@ -319,7 +319,7 @@ class DecomposerAgent:
             "--add-label", self.DECOMPOSED_LABEL,
         ])
 
-    def _gh(self, args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    def _gh(self, args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising on non-zero exit."""
         cmd = ["gh"] + args
         try:

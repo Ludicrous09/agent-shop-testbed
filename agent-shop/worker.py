@@ -155,35 +155,22 @@ class Worker:
         prompt = self._build_prompt()
         use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
 
+        cmd = [
+            "claude",
+            "--output-format",
+            "json",
+            "--model",
+            self.task.model,
+            "--max-turns",
+            str(self.task.max_turns),
+            "--allowedTools",
+            "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
+            "--dangerously-skip-permissions",
+        ]
         if use_stdin:
-            cmd = [
-                "claude",
-                "--output-format",
-                "json",
-                "--model",
-                self.task.model,
-                "--max-turns",
-                str(self.task.max_turns),
-                "--allowedTools",
-                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
-                "--dangerously-skip-permissions",
-            ]
             stdin_input: str | None = prompt
         else:
-            cmd = [
-                "claude",
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                "--model",
-                self.task.model,
-                "--max-turns",
-                str(self.task.max_turns),
-                "--allowedTools",
-                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(pytest:*),Bash(python:*),Bash(ruff:*)",
-                "--dangerously-skip-permissions",
-            ]
+            cmd += ["-p", prompt]
             stdin_input = None
 
         logger.info(
@@ -291,7 +278,7 @@ class Worker:
         for filepath in sorted(unauthorized):
             # Guard against path traversal attacks from git output
             full_path = (self.worktree_path / filepath).resolve()
-            if not str(full_path).startswith(worktree_resolved):
+            if not str(full_path).startswith(worktree_resolved + os.sep):
                 logger.warning("Path traversal blocked: %s", filepath)
                 continue
             # Check whether the file exists in main
@@ -503,35 +490,22 @@ class Worker:
 
         use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
 
+        cmd = [
+            "claude",
+            "--output-format",
+            "json",
+            "--model",
+            self.task.model,
+            "--max-turns",
+            "10",
+            "--allowedTools",
+            "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
+            "--dangerously-skip-permissions",
+        ]
         if use_stdin:
-            cmd = [
-                "claude",
-                "--output-format",
-                "json",
-                "--model",
-                self.task.model,
-                "--max-turns",
-                "10",
-                "--allowedTools",
-                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
-                "--dangerously-skip-permissions",
-            ]
             stdin_input: str | None = prompt
         else:
-            cmd = [
-                "claude",
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                "--model",
-                self.task.model,
-                "--max-turns",
-                "10",
-                "--allowedTools",
-                "Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git diff:*)",
-                "--dangerously-skip-permissions",
-            ]
+            cmd += ["-p", prompt]
             stdin_input = None
 
         logger.info(
@@ -652,7 +626,8 @@ class Worker:
                 f"You MUST only create or modify these files: {files_list}. "
                 f"Do not touch any other files.\n\n"
             )
-        return (
+
+        task_body = (
             f"{file_scope}"
             f"{desc}\n\n"
             f"After making your changes:\n"
@@ -663,6 +638,44 @@ class Worker:
             f"5. Do NOT push\n"
             f"6. Do NOT modify files in .github/"
         )
+
+        # Read CLAUDE.md from the worktree root if it exists
+        claude_md_content: str = ""
+        claude_md_path = self.worktree_path / "CLAUDE.md"
+        if claude_md_path.exists():
+            try:
+                claude_md_content = claude_md_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Could not read CLAUDE.md: %s", exc)
+
+        # Read .claude/settings.json if it exists and include relevant settings
+        settings_section: str = ""
+        settings_path = self.worktree_path / ".claude" / "settings.json"
+        if settings_path.exists():
+            try:
+                settings_data = json.loads(
+                    settings_path.read_text(encoding="utf-8")
+                )
+                if settings_data:
+                    settings_section = (
+                        "\n\nProject settings (.claude/settings.json):\n"
+                        + json.dumps(settings_data, indent=2)
+                    )
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not read .claude/settings.json: %s", exc)
+
+        if claude_md_content:
+            context = (
+                f"The following is the project context from CLAUDE.md:\n"
+                f"{claude_md_content}"
+                f"{settings_section}"
+            )
+            return f"{context}\n\n---\n\nYour task:\n{task_body}"
+
+        if settings_section:
+            return f"{settings_section.lstrip()}\n\n---\n\nYour task:\n{task_body}"
+
+        return task_body
 
     def _build_pr_body(self, result: WorkerResult) -> str:
         files_section = (

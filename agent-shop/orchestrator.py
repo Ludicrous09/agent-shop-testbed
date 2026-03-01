@@ -23,6 +23,7 @@ from issue_source import IssueSource
 from decomposer import DecomposerAgent, is_vague
 from conflict_resolver import ConflictResolver
 from architect import ArchitectAgent
+from claude_md_generator import run as generate_claude_md
 
 from rich.console import Console
 from rich.live import Live
@@ -462,7 +463,7 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                 for _retry in range(3):
                     if mergeable != "UNKNOWN":
                         break
-                    log.info("PR #%d mergeability UNKNOWN, retrying (%d/3)...", pr, _retry + 1)
+                    log.info("PR #%d mergeability UNKNOWN, sleeping 5s then retrying (attempt %d/3)", pr, _retry + 1)
                     time.sleep(5)
                     retry_unknown_proc = subprocess.run(
                         ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
@@ -478,7 +479,14 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                             retry_unknown_proc.stderr.strip(),
                         )
                         break
-                    mergeable = retry_unknown_proc.stdout.strip()
+                    retry_mergeable = retry_unknown_proc.stdout.strip()
+                    if not retry_mergeable:
+                        log.warning(
+                            "PR #%d mergeability retry returned empty response, skipping",
+                            pr,
+                        )
+                        break
+                    mergeable = retry_mergeable
                     log.info("PR #%d mergeability: %s", pr, mergeable)
 
                 if mergeable == "UNKNOWN":
@@ -671,6 +679,19 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
 
         return False, f"**Review/fix/merge cycle exhausted** for {pr_url}"  # unreachable but satisfies type checkers
 
+    except subprocess.TimeoutExpired as exc:
+        cmd_str = " ".join(exc.cmd) if isinstance(exc.cmd, list) else str(exc.cmd)
+        log.error(
+            "subprocess timed out in review/fix/merge for PR #%d: `%s` (timeout=%ss)",
+            pr,
+            cmd_str,
+            exc.timeout,
+        )
+        error_msg = (
+            f"**Timeout** in review/fix/merge cycle for {pr_url}\n\n"
+            f"Command `{cmd_str}` timed out after {exc.timeout}s."
+        )
+        return False, error_msg
     except Exception as exc:
         tb = traceback.format_exc()
         log.error("Unexpected error in review/fix/merge for PR #%d: %s", pr, exc)
@@ -933,6 +954,19 @@ def _run_decomposer_pass(repo: Path, label: str) -> None:
             log.error("Failed to decompose issue #%d: %s", iss["number"], exc)
 
 
+def _send_desktop_notification(completed: int, failed: int, elapsed: float) -> None:
+    """Send a desktop notification summarising the run. Silently ignored on failure."""
+    message = f"{completed} completed, {failed} failed ({_format_duration(elapsed)})"
+    try:
+        subprocess.run(
+            ["notify-send", "Agent Shop", message],
+            check=False,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def orchestrate(
     plan_path: str,
     max_workers: int,
@@ -945,12 +979,23 @@ async def orchestrate(
     dry_run: bool = False,
     decompose: bool = False,
     architect: bool = False,
+    max_priority: int | None = None,
+    generate_claude_md_flag: bool = False,
+    notify: bool = True,
 ) -> None:
     repo = Path(repo_path).resolve()
     # status.json stays local to the orchestrator's working directory,
     # not inside the (potentially external) target repo.
     status_path = Path("status.json")
     log_dir_path = Path(log_dir)
+
+    if generate_claude_md_flag:
+        log.info("--generate-claude-md set: generating CLAUDE.md for %s", repo)
+        written = generate_claude_md(repo)
+        if written:
+            log.info("CLAUDE.md generated at %s", repo / "CLAUDE.md")
+        else:
+            log.info("CLAUDE.md already exists at %s — skipping generation", repo / "CLAUDE.md")
 
     if decompose and source != "issues":
         log.warning(
@@ -1163,6 +1208,12 @@ async def orchestrate(
                         group_completed,
                         group_failed,
                     )
+                    if max_priority is not None and current_priority >= max_priority:
+                        log.info(
+                            "Stopping after priority %d (--max-priority)",
+                            current_priority,
+                        )
+                        break
                     if current_priority_idx + 1 < len(sorted_priorities):
                         current_priority_idx += 1
                         state.current_priority = sorted_priorities[current_priority_idx]
@@ -1246,6 +1297,13 @@ async def orchestrate(
             console.print(f"  PR: {r.pr_url}")
     write_status(state, status_path)
 
+    if notify:
+        _send_desktop_notification(
+            len(state.completed_ids),
+            len(state.failed_ids),
+            total_elapsed,
+        )
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point
@@ -1320,6 +1378,30 @@ def main() -> None:
             "description."
         ),
     )
+    parser.add_argument(
+        "--max-priority",
+        type=int,
+        default=None,
+        help=(
+            "Stop processing after completing this priority level "
+            "(e.g. --max-priority 2 processes priority:1 and priority:2, skips priority:3)"
+        ),
+    )
+    parser.add_argument(
+        "--generate-claude-md",
+        action="store_true",
+        default=False,
+        help=(
+            "Auto-generate a CLAUDE.md in the target repo before starting tasks. "
+            "Skipped if CLAUDE.md already exists."
+        ),
+    )
+    parser.add_argument(
+        "--notify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Send a desktop notification when orchestration completes (default: True)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1341,6 +1423,9 @@ def main() -> None:
             dry_run=args.dry_run,
             decompose=args.decompose,
             architect=args.architect,
+            max_priority=args.max_priority,
+            generate_claude_md_flag=args.generate_claude_md,
+            notify=args.notify,
         ))
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted![/bold red] Cancelling active workers…")

@@ -351,27 +351,18 @@ class ConflictResolver:
     def _run_claude(self, prompt: str) -> str:
         use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
 
+        cmd = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "json",
+            "--model",
+            self.model,
+        ]
         if use_stdin:
-            cmd = [
-                "claude",
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "json",
-                "--model",
-                self.model,
-            ]
             stdin_input: str | None = prompt
         else:
-            cmd = [
-                "claude",
-                "-p",
-                prompt,
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "json",
-                "--model",
-                self.model,
-            ]
+            cmd[1:1] = ["-p", prompt]
             stdin_input = None
 
         logger.info("Running claude for conflict resolution (timeout=%ds)", self.timeout)
@@ -450,13 +441,21 @@ class ConflictResolver:
             f"{files_list}\n\n"
             f"*Automated conflict resolution by agent-shop conflict resolver*"
         )
-        proc = subprocess.run(
-            ["gh", "pr", "comment", str(self.pr_number), "--body", body],
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        try:
+            proc = subprocess.run(
+                ["gh", "pr", "comment", str(self.pr_number), "--body", body],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "gh pr comment timed out after %ds on PR #%d",
+                self.timeout,
+                self.pr_number,
+            )
+            return
         if proc.returncode != 0:
             logger.warning(
                 "gh pr comment failed (code %d): %s",
