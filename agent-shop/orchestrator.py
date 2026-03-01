@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -251,6 +252,51 @@ def build_table(state: OrchestratorState) -> Table:
 _FOLLOWUP_LABEL_COLOR = "d8b4fe"  # light purple
 
 
+def _clean_env() -> dict[str, str]:
+    """Return a copy of os.environ without the CLAUDECODE variable."""
+    return {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+
+def _summarize_review_comment(comment_text: str, filename: str, line: int) -> tuple[str, str]:
+    """Use Claude CLI to generate a concise title and action summary.
+
+    Returns (title_suffix, action_summary) where title_suffix is under 60 chars
+    and action_summary is 1-2 sentences.  Falls back to truncated text on failure.
+    """
+    prompt = (
+        "You are summarizing a code review comment for a GitHub issue title and body.\n\n"
+        f"File: {filename}:{line}\n"
+        f"Comment:\n{comment_text}\n\n"
+        "Respond with EXACTLY two lines, nothing else:\n"
+        "Line 1: A concise title suffix (under 55 chars) in the format: "
+        f"{filename}: <brief description of the fix>\n"
+        "Line 2: A 1-2 sentence summary of what action is needed.\n\n"
+        "Do NOT include any markdown, prefixes, labels, or extra text."
+    )
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "text"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=_clean_env(),
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            lines = proc.stdout.strip().splitlines()
+            title_suffix = lines[0].strip() if lines else ""
+            action_summary = lines[1].strip() if len(lines) > 1 else ""
+            if title_suffix and len(title_suffix) <= 80:
+                return title_suffix, action_summary
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Fallback: truncate the first sentence
+    brief = comment_text.split(".")[0].strip()
+    if len(brief) > 57:
+        brief = brief[:54] + "..."
+    return f"{filename}: {brief}"[:60], ""
+
+
 def _check_label_exists(repo_path: Path, label_name: str) -> bool:
     """Return True if *label_name* already exists in the repository."""
     proc = subprocess.run(
@@ -302,6 +348,23 @@ def _ensure_review_followup_label(repo_path: Path) -> None:
         log.info("Created 'review-followup' label")
 
 
+def _get_pr_title(repo_path: Path, pr_number: int) -> str:
+    """Fetch the PR title via gh. Returns empty string on failure."""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "title", "--jq", ".title"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
+
+
 def _create_followup_issues(
     repo_path: Path,
     review: ReviewResult,
@@ -317,6 +380,7 @@ def _create_followup_issues(
     """
     created_urls: list[str] = []
     priority_label_exists = _check_label_exists(repo_path, "priority:3")
+    pr_title = _get_pr_title(repo_path, pr_number)
 
     for comment in review.comments:
         if comment.severity not in ("warning", "suggestion"):
@@ -332,11 +396,13 @@ def _create_followup_issues(
             )
             continue
 
-        # Build a short title from the first sentence / first 60 chars
-        brief = text.split(".")[0].strip()
-        if len(brief) > 60:
-            brief = brief[:57] + "..."
-        title = f"[Review Follow-up] {brief}"
+        # Use Claude to generate a concise title and action summary
+        title_suffix, action_summary = _summarize_review_comment(
+            text, comment.file, comment.line
+        )
+        title = f"[Review Follow-up] {title_suffix}"
+        if len(title) > 80:
+            title = title[:77] + "..."
 
         # Deduplicate: search for open issues with the [Review Follow-up] prefix
         search_proc = subprocess.run(
@@ -361,16 +427,31 @@ def _create_followup_issues(
             except (json.JSONDecodeError, KeyError):
                 pass
 
+        pr_ref = f"PR #{pr_number}"
+        if pr_title:
+            pr_ref += f" ({pr_title})"
+
+        what_to_fix = action_summary if action_summary else text.split(".")[0].strip() + "."
+
         body = (
+            "### Description\n"
+            "\n"
+            f"Review feedback from {pr_ref}:\n"
+            "\n"
             f"**Severity:** {comment.severity.upper()}\n"
             f"**File:** `{comment.file}:{comment.line}`\n"
+            "**Original comment:**\n"
+            f"> {text}\n"
             "\n"
-            "## Original Review Comment\n"
+            f"**What to fix:** {what_to_fix}\n"
             "\n"
-            f"{text}\n"
+            "### Files\n"
             "\n"
-            "---\n"
-            f"*Created automatically from review of {pr_url} (PR #{pr_number})*"
+            f"- {comment.file}\n"
+            "\n"
+            "### Max turns\n"
+            "\n"
+            "20\n"
         )
 
         create_cmd = [

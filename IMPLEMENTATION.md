@@ -8,6 +8,7 @@
 **Runtime:** WSL Ubuntu on local machine
 **Language:** Python 3.12 with venv
 **Subscription:** Claude Max 5x ($100/mo)
+**Stats:** 38 merged PRs, 4 self-improvement rounds
 
 ---
 
@@ -24,16 +25,25 @@
 │            ORCHESTRATOR (orchestrator.py)                 │
 │                                                          │
 │  • Reads GitHub Issues or PLAN.yaml                      │
-│  • Resolves dependencies + file conflict detection       │
+│  • Priority batching (completes P1 before starting P2)   │
+│  • --max-priority to limit scope                         │
+│  • Dependency resolution + file conflict detection       │
 │  • Spawns Claude Code workers in isolated worktrees      │
+│  • Post-work rebase before push (prevents conflicts)     │
 │  • Review → Fix → Re-review → Auto-merge pipeline       │
+│  • Conflict resolution on merge failures                 │
 │  • Retries failed workers (configurable, default 2)      │
 │  • Enforces file scope (workers can't modify unlisted)   │
 │  • Rich dashboard with timing + cost tracking            │
 │  • Dry-run mode to preview execution plan                │
+│  • Auto-creates follow-up issues from review feedback    │
 │  • Targets any repo via --repo-path                      │
 │  • Task decomposition for vague issues (--decompose)     │
-│  • Conflict resolution before marking tasks failed       │
+│  • Architect agent enrichment (--architect)               │
+│  • CLAUDE.md generator for target repos                  │
+│  • Desktop notifications on completion                   │
+│  • Detailed error reporting on failures                  │
+│  • Skips issues with already-merged PRs                  │
 └──────┬──────────────┬──────────────┬─────────────────────┘
        │              │              │
        ▼              ▼              ▼
@@ -41,9 +51,9 @@
 │  Worker    │ │  Worker    │ │ Review Agent │
 │  Agent     │ │  Agent     │ │              │
 │ (headless) │ │ (headless) │ │ Reviews PR   │
-│ branch/A   │ │ branch/B   │ │ Posts verdict│
+│ worktree/A │ │ worktree/B │ │ Posts verdict│
 │ Code+Test  │ │ Code+Test  │ │ Fix→Re-review│
-│ Commit+PR  │ │ Commit+PR  │ │ Auto-merge   │
+│ Rebase+PR  │ │ Rebase+PR  │ │ Auto-merge   │
 └─────┬──────┘ └─────┬──────┘ └──────┬───────┘
       │              │               │
       ▼              ▼               ▼
@@ -52,9 +62,47 @@
 │  • Feature branches with PRs                             │
 │  • GitHub Actions CI: ruff + pytest on all PRs           │
 │  • Labels: agent-ready, agent-failed, agent-created      │
+│  • Labels: priority:1/2/3, review-followup               │
 │  • Issue template for structured task creation           │
 │  • Auto-closed issues on successful merge                │
+│  • Auto-created follow-up issues from review feedback    │
 └──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Quick Start
+
+### Aliases (configured in ~/.bashrc)
+
+```bash
+agent-run       # Run priority 1-2 issues (safe default)
+agent-run-all   # Run all priorities including P3 cleanup
+agent-dry       # Preview execution plan without running
+agent-sync      # Sync agent-shop code to testbed + commit + push
+```
+
+### Manual Run
+
+```bash
+cd ~/code/personal/agent-shop-testbed
+source agent-shop/.venv/bin/activate
+
+# Self-improvement (agents modify agent-shop)
+CLAUDECODE= python agent-shop/orchestrator.py \
+  --source issues \
+  --repo-path ~/code/personal/agent-shop \
+  --log-dir agent-shop/logs \
+  --max-workers 2 \
+  --max-priority 2 \
+  --timeout 600
+
+# Target any repo
+CLAUDECODE= python agent-shop/orchestrator.py \
+  --source issues \
+  --repo-path ~/code/personal/our-caring-circle \
+  --log-dir agent-shop/logs \
+  --max-workers 2
 ```
 
 ---
@@ -69,52 +117,30 @@ agent-shop/                      ← Self-improving tool (agents modify this)
 our-caring-circle/               ← Production app (next target)
 ```
 
-**Sync after improvements:**
-```bash
-cd ~/code/personal/agent-shop
-bash sync.sh  # copies code to testbed
-```
-
-**Running:**
-```bash
-cd ~/code/personal/agent-shop-testbed
-source agent-shop/.venv/bin/activate
-CLAUDECODE= python agent-shop/orchestrator.py \
-  --source issues \
-  --repo-path ~/code/personal/agent-shop \
-  --log-dir agent-shop/logs \
-  --max-workers 2
-```
+**Workflow:**
+1. Create issues on target repo with `agent-ready` label
+2. `agent-sync` to copy latest code to testbed
+3. `agent-run` to process issues
+4. Review results, merge any failed PRs manually if needed
+5. `agent-sync` again after self-improvement rounds
 
 ---
 
 ## Module Inventory
 
-| Module | Purpose | Added |
-|--------|---------|-------|
-| `orchestrator.py` | Main async loop — spawns workers, manages state, dashboard | Phase 2 |
-| `worker.py` | Claude Code headless worker with worktree isolation | Phase 1 |
-| `reviewer.py` | Code review agent — reads diffs, posts structured reviews | Phase 3 |
-| `fixer.py` | Fix agent — addresses review feedback with linked commits | Phase 3 |
-| `task_manager.py` | PLAN.yaml parser and dependency resolver | Phase 2 |
-| `issue_source.py` | GitHub Issues as task source | Phase 4 |
-| `decomposer.py` | Task decomposition — breaks vague issues into sub-tasks | Self-improvement R2 |
-| `conflict_resolver.py` | Auto-resolves merge conflicts via Claude | Self-improvement R2 |
-| `sync.sh` | Copies agent-shop code to testbed | Self-improvement R2 |
-
-### Tests
-
-| Test File | Covers |
-|-----------|--------|
-| `tests/test_task_manager.py` | PLAN.yaml parsing, dependency resolution, ready task filtering |
-| `tests/test_issue_source.py` | Issue body parsing, file extraction, depends_on, max_turns |
-| `tests/test_worker.py` | File scope enforcement |
-| `tests/test_orchestrator_paths.py` | --repo-path and --log-dir behavior, decompose integration |
-| `tests/test_orchestrator_timing.py` | Duration tracking, cost tracking, summary stats |
-| `tests/test_dry_run.py` | Dry-run mode output |
-| `tests/test_conflict_resolver.py` | Conflict detection, resolution, error handling |
-| `tests/test_decomposer.py` | Task decomposition, sub-issue creation, error handling |
-| `test_retry.py` | Retry logic, branch cleanup, suffix handling |
+| Module | Purpose | Trigger |
+|--------|---------|---------|
+| `orchestrator.py` | Main async loop — spawns workers, manages state, dashboard | Always |
+| `worker.py` | Claude Code headless worker with worktree isolation | Always — every task |
+| `reviewer.py` | Code review agent — reads diffs, posts structured reviews | Always — every PR |
+| `fixer.py` | Fix agent — addresses review feedback | When review says REQUEST_CHANGES |
+| `conflict_resolver.py` | Auto-resolves merge conflicts via Claude | Auto — when merge fails |
+| `task_manager.py` | PLAN.yaml parser and dependency resolver | When `--source plan` |
+| `issue_source.py` | GitHub Issues as task source | When `--source issues` |
+| `decomposer.py` | Breaks vague issues into scoped sub-tasks | When `--decompose` flag |
+| `architect.py` | Designs solutions with Opus/CLI before workers execute | When `--architect` flag |
+| `claude_md_generator.py` | Auto-generates CLAUDE.md for target repos | When `--generate-claude-md` flag |
+| `sync.sh` | Copies all .py files to testbed | Manual: `agent-sync` |
 
 ---
 
@@ -128,125 +154,125 @@ CLAUDECODE= python agent-shop/orchestrator.py \
 | `--repo-path` | `.` | Path to target git repo |
 | `--max-workers` | `2` | Maximum parallel worker agents |
 | `--max-retries` | `2` | Retry attempts for failed workers |
+| `--max-priority` | `None` | Stop after this priority level (e.g., 2 = skip P3) |
 | `--timeout` | `600` | Per-task timeout (seconds) |
 | `--log-dir` | `./logs` | Directory for worker logs |
 | `--dry-run` | `False` | Preview execution plan without running |
 | `--decompose` | `False` | Auto-decompose vague issues into sub-tasks |
+| `--architect` | `False` | Enrich tasks with Opus spec before workers execute |
+| `--generate-claude-md` | `False` | Auto-generate CLAUDE.md for target repo |
 
 ---
 
-## Build History
+## Self-Improvement History
 
-### Phase 1-4: Foundation → Full Pipeline (testbed)
-
-Built and proven in agent-shop-testbed:
-- Worker with worktree isolation and Claude Code headless mode
-- Orchestrator with async parallel execution and dependency resolution
-- Review agent that catches real bugs (proven: truncate function negative index)
-- Fix agent that addresses review feedback with linked commits
-- GitHub Issues as task source with template support
-- Auto-merge pipeline: Worker → Review → Fix → Re-review → Merge → Close Issue
-
-### Self-Improvement Round 1 (agent-shop issues #1-4)
-
-Agents improved themselves — orchestrator ran from testbed targeting agent-shop:
+### Round 1 — Foundation (issues #1-4)
 
 | Issue | Title | PR | Status |
 |-------|-------|----|--------|
-| #1 | Retry logic for worker failures | #7 | ✅ Merged |
-| #2 | GitHub Actions CI pipeline | #5 | ✅ Merged |
-| #3 | External repo targeting (--repo-path) | #8 | ✅ Merged (conflict resolved) |
-| #4 | Unit tests for task_manager and issue_source | #6 | ✅ Merged |
+| #1 | Retry logic for worker failures | #7 | ✅ |
+| #2 | GitHub Actions CI pipeline | #5 | ✅ |
+| #3 | External repo targeting | #8 | ✅ |
+| #4 | Unit tests for core modules | #6 | ✅ |
 
-**Bug discovered:** `CLAUDECODE` env var blocks nested Claude sessions. Fixed in worker, reviewer, and fixer.
+### Round 2 — Features (issues #9-15)
 
-### Self-Improvement Round 2 (agent-shop issues #9-15)
+| Issue | Title | PR | Status |
+|-------|-------|----|--------|
+| #9 | File scope enforcement | #17 | ✅ |
+| #10 | Sync script | #19 | ✅ |
+| #11 | Dry-run mode | #21 | ✅ |
+| #12 | Review agent quality | #16 | ✅ |
+| #13 | Dashboard timing + cost | #18 | ✅ |
+| #14 | Task decomposition agent | #23 | ✅ |
+| #15 | Conflict resolution agent | #22 | ✅ |
 
-| Issue | Title | PR | Status | Notes |
-|-------|-------|----|--------|-------|
-| #9 | File scope enforcement | #17 | ✅ Merged | Workers can't modify unlisted files |
-| #10 | Sync script | #19 | ✅ Merged | `bash sync.sh` copies to testbed |
-| #11 | Dry-run mode | #21 | ✅ Merged | `--dry-run` previews execution plan |
-| #12 | Review agent quality | #16 | ✅ Merged | Fewer false positive REQUEST_CHANGES |
-| #13 | Dashboard timing + cost | #18 | ✅ Merged | Duration and cost columns in dashboard |
-| #14 | Task decomposition agent | #23 | ✅ Merged | `--decompose` breaks vague issues into sub-tasks |
-| #15 | Conflict resolution agent | #22 | ✅ Merged | Auto-resolves merge conflicts via Claude |
+### Round 3 — Robustness (issues #20-42)
 
-**4 completed by orchestrator automatically, 3 failed review/merge (merge conflicts from parallel PRs). All 3 rescued via manual review + rebase + merge.**
+| Issue | Title | PR | Status |
+|-------|-------|----|--------|
+| #20 | Post-work rebase before push | #33 | ✅ |
+| #24 | Detailed error messages | #32 | ✅ |
+| #25 | PR mergeability check | #31 | ✅ |
+| #26 | Priority batching | #30 | ✅ |
+| #27 | Architect agent | #35 | ✅ |
+| #28 | Auto-create follow-up issues | #34 | ✅ |
+| #29 | Update sync.sh | — | ✅ (manual) |
+| #36 | Path traversal security fixes | #45 | ✅ |
+| #37 | ARG_MAX temp file fix | #47 | ✅ |
+| #38 | Subprocess timeout/returncode | #52 | ✅ |
+| #39 | Missing unit tests | #50 | ✅ |
+| #40 | Mergeability UNKNOWN retry | #55 | ✅ |
+| #41 | Cleanup: type hints, dead code | #58 | ✅ |
+| #42 | Skip already-merged issues | #44 | ✅ |
 
----
+### Round 4 — Polish (issues #43-92)
 
-## Open Issues
-
-| Issue | Title | Priority |
-|-------|-------|----------|
-| #20 | Post-work rebase step before pushing | 1 |
-
----
-
-## Next Issues to Create
-
-### High Priority — Needed for our-caring-circle
-
-- **CLAUDE.md generator** — auto-generate a CLAUDE.md for target repos by analyzing the codebase (tech stack, conventions, test framework)
-- **Better error messages on review/merge failure** — currently just "Review/fix/merge cycle failed" with no detail. Log the actual exception/stderr to the issue comment
-- **PR conflict detection before merge** — check `gh pr view --json mergeable` before attempting `gh pr merge`, run conflict_resolver if not mergeable
-- **Priority batching** — complete all priority:1 tasks and merge them before starting priority:2
-
-### Medium Priority — Quality of Life
-
-- **Worker prompt customization** — allow CLAUDE.md or per-task prompt overrides for different repos
-- **Cost reporting** — aggregate prompt costs per run and per task in final summary
-- **Notification on completion** — desktop notification or webhook when orchestrator finishes
-- **Smarter review agent** — pass CLAUDE.md context to reviewer so it understands project conventions
-
-### Lower Priority — Future Vision
-
-- **Web dashboard** — real-time monitoring UI instead of terminal
-- **GitHub Actions trigger** — run orchestrator when issues are labeled agent-ready
-- **Multi-repo orchestration** — process issues across multiple repos in one run
-- **Agent Teams integration** — use Claude Code native Agent Teams as workers
-- **Prompt caching** — reuse review prompts for re-reviews to save tokens
+| Issue | Title | PR | Status |
+|-------|-------|----|--------|
+| #43 | Architect to CLI (remove API dep) | merged | ✅ |
+| #61 | --max-priority flag | merged | ✅ |
+| #62 | CLAUDE.md generator | merged | ✅ |
+| #63 | CLAUDE.md in worker prompts | merged | ✅ |
+| #64 | Desktop notifications | merged | ✅ |
+| #46-59 | Review follow-up cleanup (9 items) | merged | ✅ |
+| #60 | Better follow-up issue quality | — | ❌ (in progress) |
+| #66-92 | Review follow-up items (round 4) | — | Open (P3) |
 
 ---
 
 ## Known Issues & Lessons
 
-1. **CLAUDECODE nesting** — Claude Code sets env var blocking nested sessions. All subprocess `claude` calls strip it. Use `CLAUDECODE=` prefix when launching from Claude Code terminal.
+1. **CLAUDECODE nesting** — All subprocess `claude` calls strip the CLAUDECODE env var. Use `CLAUDECODE=` prefix when launching from Claude Code terminal.
 
-2. **Merge conflicts from parallel PRs** — When 2+ workers modify the same file (e.g., orchestrator.py), the second PR will have conflicts. Mitigations: file conflict detection, post-work rebase (issue #20), conflict resolver agent.
+2. **Merge conflicts** — Mitigated by: post-work rebase, mergeability check + conflict resolver, priority batching, `--max-workers 1` for safety.
 
-3. **Review/merge failure reporting** — The orchestrator logs "Review/fix/merge cycle failed" but doesn't surface the actual error to the issue comment.
+3. **Review follow-up quality** — Auto-created issues have truncated titles. Issue #60 addresses this.
 
-4. **PR scope creep** — Workers sometimes modify files beyond what the issue requested. Fixed by file scope enforcement (issue #9).
+4. **CI was broken** — Workflow wasn't installing dependencies. Fixed manually (requirements.txt + updated ci.yml).
 
-5. **GitHub merge after rebase** — Sometimes `gh pr merge` fails after a local rebase + force push. Workaround: `gh pr checkout N && git merge origin/main && git push`.
+5. **GitHub merge after rebase** — Sometimes `gh pr merge` fails after force push. Workaround: `gh pr checkout N && git merge origin/main && git push`.
 
-6. **Review is sequential** — Reviews run one at a time even when multiple PRs are ready. This is a bottleneck when many tasks complete simultaneously.
+6. **Review is sequential** — Reviews run one at a time. Bottleneck when many tasks complete simultaneously.
+
+7. **Follow-up breeding** — Each run generates more review follow-ups. Use `--max-priority 2` to prevent chasing cleanup indefinitely.
+
+---
+
+## Future Work
+
+### Ready for our-caring-circle
+- [x] CLAUDE.md generator for unknown repos
+- [x] CLAUDE.md included in worker prompts
+- [x] --max-priority to control scope
+- [ ] Test run on our-caring-circle with small issues
+
+### Remaining
+- [ ] Fix issue #60 — better follow-up issue titles
+- [ ] CI fix for issue template (requirements.txt created)
+- [ ] Rate limiter — track subscription usage
+- [ ] Web dashboard — real-time monitoring UI
+- [ ] GitHub Actions trigger — auto-run on issue label
+- [ ] Multi-repo orchestration
+- [ ] Branch protection rules on main
 
 ---
 
 ## Prerequisites
 
-- [x] Claude Code CLI installed (v2.1.59+)
+- [x] Claude Code CLI installed
 - [x] GitHub CLI authenticated as Ludicrous09
 - [x] Python 3.12 with venv
-- [x] Dependencies: pyyaml, rich, gitpython
-- [x] agent-shop repo with labels
-- [x] agent-shop-testbed repo (stable runner)
+- [x] All runtime dependencies (pyyaml, rich, gitpython, anthropic)
+- [x] agent-shop repo with full label set
+- [x] agent-shop-testbed as stable runner
 - [x] Max 5x subscription active
-- [x] GitHub Actions CI
-- [x] Unit tests for all core modules
-- [x] Retry logic
-- [x] External repo targeting
-- [x] File scope enforcement
-- [x] Dry-run mode
-- [x] Dashboard timing and cost tracking
-- [x] Task decomposition agent
-- [x] Conflict resolution agent
-- [x] Sync script
-- [x] Review agent quality improvements
-- [ ] Post-work rebase (issue #20)
-- [ ] Priority batching
-- [ ] Better error reporting
-- [ ] Branch protection rules
+- [x] GitHub Actions CI (with dependencies)
+- [x] Unit tests for all modules
+- [x] Retry logic, file scope, priority batching
+- [x] Conflict resolution, post-work rebase
+- [x] Architect agent, decomposer agent
+- [x] CLAUDE.md generator
+- [x] Desktop notifications
+- [x] Detailed error reporting
+- [x] Shell aliases configured
