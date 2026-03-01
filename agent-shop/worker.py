@@ -216,6 +216,27 @@ class Worker:
 
         return output, parsed
 
+    @staticmethod
+    def _path_is_authorized(filepath: str, allowed: set[str]) -> bool:
+        """Return True if *filepath* is covered by any entry in *allowed*.
+
+        Handles both exact matches and partial-path (suffix) matches so that
+        an allowlist entry of ``approval.py`` authorises a changed file
+        reported as ``bot/cogs/approval.py``, and vice-versa.
+        """
+        if filepath in allowed:
+            return True
+        for a in allowed:
+            # allowlist entry is a suffix of the changed path
+            # e.g. a="approval.py", filepath="bot/cogs/approval.py"
+            if filepath.endswith("/" + a):
+                return True
+            # changed path is a suffix of the allowlist entry
+            # e.g. a="bot/cogs/approval.py", filepath="approval.py"
+            if a.endswith("/" + filepath):
+                return True
+        return False
+
     def _enforce_file_scope(self) -> None:
         """Revert any files modified outside of task.files_touched."""
         if not self.task.files_touched:
@@ -263,7 +284,7 @@ class Worker:
                 if f:
                     changed.add(f)
 
-        unauthorized = changed - allowed
+        unauthorized = {f for f in changed if not self._path_is_authorized(f, allowed)}
         if not unauthorized:
             return
 

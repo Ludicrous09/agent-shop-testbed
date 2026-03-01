@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -34,6 +35,10 @@ log = logging.getLogger("orchestrator")
 console = Console()
 
 PROMPTS_PER_TASK = 5
+
+# Mergeability polling after conflict resolution
+POST_RESOLVE_MERGEABILITY_MAX_RETRIES = 5
+POST_RESOLVE_MERGEABILITY_RETRY_INTERVAL = 3  # seconds
 
 
 # ---------------------------------------------------------------------------
@@ -493,15 +498,22 @@ def _create_followup_issues(
 MAX_FIX_ATTEMPTS = 2
 
 
-def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool, str]:
+def _review_fix_merge_sync(
+    repo_path: Path, result: WorkerResult, max_fix_attempts: int = MAX_FIX_ATTEMPTS
+) -> tuple[bool, str]:
     """Blocking review/fix/merge cycle. Returns (True, '') on success or (False, error_msg) on failure."""
     pr = result.pr_number
     assert pr is not None
     pr_url = result.pr_url or f"PR #{pr}"
 
+    # When the agent is making progress (error count decreasing each round), allow up to
+    # 3 extra fix attempts beyond max_fix_attempts before giving up.
+    abs_max_fixes = max_fix_attempts + 3
+    prev_error_count: int | None = None
+
     try:
-        for attempt in range(MAX_FIX_ATTEMPTS + 1):
-            log.info("Reviewing PR #%d (attempt %d/%d)", pr, attempt + 1, MAX_FIX_ATTEMPTS + 1)
+        for attempt in range(abs_max_fixes + 1):
+            log.info("Reviewing PR #%d (round %d)", pr, attempt + 1)
             try:
                 reviewer = ReviewAgent(repo_path=repo_path, pr_number=pr)
                 review = reviewer.review()
@@ -514,6 +526,15 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                     f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
                 )
                 return False, error_msg
+
+            # Count and log findings per round for observability and progress tracking
+            error_count = sum(1 for c in review.comments if c.severity == "error")
+            warning_count = sum(1 for c in review.comments if c.severity == "warning")
+            suggestion_count = sum(1 for c in review.comments if c.severity == "suggestion")
+            log.info(
+                "PR #%d round %d findings: %d error(s), %d warning(s), %d suggestion(s)",
+                pr, attempt + 1, error_count, warning_count, suggestion_count,
+            )
 
             if review.verdict == "approve":
                 log.info("PR #%d approved — checking mergeability before merge", pr)
@@ -589,27 +610,40 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                         )
                         # Sleep to allow GitHub to recompute merge status after push
                         time.sleep(2)
-                        retry_mergeable_proc = subprocess.run(
-                            ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True,
-                            timeout=60,
-                        )
-                        if retry_mergeable_proc.returncode != 0:
-                            log.error(
-                                "PR #%d post-resolution mergeability check failed: %s",
-                                pr,
-                                retry_mergeable_proc.stderr.strip(),
+                        mergeable = ""
+                        for _post_attempt in range(POST_RESOLVE_MERGEABILITY_MAX_RETRIES):
+                            retry_mergeable_proc = subprocess.run(
+                                ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
+                                cwd=repo_path,
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
                             )
-                            error_msg = (
-                                f"**Merge step failed** for {pr_url}\n\n"
-                                f"gh command failed after conflict resolution: "
-                                f"{retry_mergeable_proc.stderr.strip()}"
-                            )
-                            return False, error_msg
-                        mergeable = retry_mergeable_proc.stdout.strip()
-                        log.info("PR #%d mergeability after resolution: %s", pr, mergeable)
+                            if retry_mergeable_proc.returncode != 0:
+                                log.error(
+                                    "PR #%d post-resolution mergeability check failed: %s",
+                                    pr,
+                                    retry_mergeable_proc.stderr.strip(),
+                                )
+                                error_msg = (
+                                    f"**Merge step failed** for {pr_url}\n\n"
+                                    f"gh command failed after conflict resolution: "
+                                    f"{retry_mergeable_proc.stderr.strip()}"
+                                )
+                                return False, error_msg
+                            mergeable = retry_mergeable_proc.stdout.strip()
+                            log.info("PR #%d mergeability after resolution: %s", pr, mergeable)
+                            if mergeable != "UNKNOWN":
+                                break
+                            if _post_attempt < POST_RESOLVE_MERGEABILITY_MAX_RETRIES - 1:
+                                log.info(
+                                    "PR #%d mergeability UNKNOWN after conflict resolution, "
+                                    "retrying (attempt %d/%d)...",
+                                    pr,
+                                    _post_attempt + 2,
+                                    POST_RESOLVE_MERGEABILITY_MAX_RETRIES,
+                                )
+                                time.sleep(POST_RESOLVE_MERGEABILITY_RETRY_INTERVAL)
                         if mergeable != "MERGEABLE":
                             log.error(
                                 "PR #%d still not mergeable after conflict resolution (status: %s)",
@@ -716,24 +750,35 @@ def _review_fix_merge_sync(repo_path: Path, result: WorkerResult) -> tuple[bool,
                 return True, ""
 
             # verdict == "request_changes"
-            if attempt >= MAX_FIX_ATTEMPTS:
-                log.error(
-                    "PR #%d still not approved after %d fix attempt(s) — marking failed",
+            making_progress = prev_error_count is not None and error_count < prev_error_count
+            if attempt >= max_fix_attempts:
+                if not making_progress or attempt >= abs_max_fixes:
+                    log.error(
+                        "PR #%d still not approved after %d fix attempt(s) — marking failed",
+                        pr,
+                        attempt,
+                    )
+                    error_msg = (
+                        f"**Review step failed** for {pr_url}\n\n"
+                        f"PR was not approved after {attempt} fix attempt(s). "
+                        f"Last review verdict: `{review.verdict}`."
+                    )
+                    return False, error_msg
+                log.info(
+                    "PR #%d: exceeded base fix limit (%d/%d) but making progress "
+                    "(%d → %d error(s)) — allowing extra fix attempt",
                     pr,
-                    MAX_FIX_ATTEMPTS,
+                    attempt,
+                    max_fix_attempts,
+                    prev_error_count,
+                    error_count,
                 )
-                error_msg = (
-                    f"**Review step failed** for {pr_url}\n\n"
-                    f"PR was not approved after {MAX_FIX_ATTEMPTS} fix attempt(s). "
-                    f"Last review verdict: `{review.verdict}`."
-                )
-                return False, error_msg
+            prev_error_count = error_count
 
             log.info(
-                "PR #%d needs changes — running FixAgent (fix %d/%d)",
+                "PR #%d needs changes — running FixAgent (fix %d)",
                 pr,
                 attempt + 1,
-                MAX_FIX_ATTEMPTS,
             )
             try:
                 fixer = FixAgent(repo_path=repo_path, pr_number=pr)
@@ -788,10 +833,12 @@ async def run_review_fix_merge(
     executor: ThreadPoolExecutor,
     repo_path: Path,
     result: WorkerResult,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
 ) -> tuple[bool, str]:
     """Run _review_fix_merge_sync in a thread via run_in_executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, _review_fix_merge_sync, repo_path, result)
+    fn = functools.partial(_review_fix_merge_sync, max_fix_attempts=max_fix_attempts)
+    return await loop.run_in_executor(executor, fn, repo_path, result)
 
 
 # ---------------------------------------------------------------------------
@@ -1056,6 +1103,7 @@ async def orchestrate(
     source: str = "plan",
     label: str = "agent-ready",
     max_retries: int = 2,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     log_dir: str = "./logs",
     dry_run: bool = False,
     decompose: bool = False,
@@ -1151,7 +1199,7 @@ async def orchestrate(
                             result.pr_number,
                         )
                         rfm_future = asyncio.ensure_future(
-                            run_review_fix_merge(executor, repo, result)
+                            run_review_fix_merge(executor, repo, result, max_fix_attempts=max_fix_attempts)
                         )
                         state.review_futures[task_id] = rfm_future
                     elif result.success:
@@ -1430,6 +1478,16 @@ def main() -> None:
         help="Max retry attempts per failed task (default: 2)",
     )
     parser.add_argument(
+        "--max-fix-attempts",
+        type=int,
+        default=MAX_FIX_ATTEMPTS,
+        help=(
+            f"Max fix attempts per PR review cycle (default: {MAX_FIX_ATTEMPTS}). "
+            "When the agent is making progress (fewer errors each round), up to 3 "
+            "extra attempts are allowed beyond this limit."
+        ),
+    )
+    parser.add_argument(
         "--log-dir",
         default="./logs",
         help="Directory for worker log files and status.json (default: ./logs)",
@@ -1500,6 +1558,7 @@ def main() -> None:
             source=args.source,
             label=args.label,
             max_retries=args.max_retries,
+            max_fix_attempts=args.max_fix_attempts,
             log_dir=args.log_dir,
             dry_run=args.dry_run,
             decompose=args.decompose,

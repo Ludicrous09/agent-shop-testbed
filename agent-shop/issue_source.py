@@ -49,9 +49,39 @@ _DEPENDS_REF = re.compile(r"#(\d+)")
 _MAX_TURNS = re.compile(r"(?:#{1,3}\s+)?max\s+turns\s*:?\s*(\d+)", re.IGNORECASE)
 _PRIORITY_LABEL = re.compile(r"^priority:(\d+)$", re.IGNORECASE)
 
+# Matches known source/config file extensions used to distinguish file paths
+# from Python dotted identifiers (e.g. discord.Embed, self.active_tasks).
+_KNOWN_FILE_EXT = re.compile(
+    r"\.(py|js|ts|jsx|tsx|json|yaml|yml|toml|md|txt|sh|cfg|ini|html|css|sql|"
+    r"go|rs|java|c|cpp|h|rb|php|env|lock|tf|proto|graphql|vue|svelte)$",
+    re.IGNORECASE,
+)
+
+
+def _is_file_path(entry: str) -> bool:
+    """Return True if *entry* looks like a file path rather than a Python symbol.
+
+    Filters out dotted Python identifiers such as ``self.active_tasks``,
+    ``discord.Embed``, and ``discord.utils.format_dt`` that sometimes appear
+    in issue "Files:" sections alongside real paths.
+
+    A string is treated as a file path when it either:
+    - contains a ``/`` (path separator), or
+    - ends with a recognised source/config file extension.
+    """
+    if not entry:
+        return False
+    if "/" in entry:
+        return True
+    return bool(_KNOWN_FILE_EXT.search(entry))
+
 
 def _parse_files(body: str) -> list[str]:
-    """Return the file list from a 'Files:' bullet section, or []."""
+    """Return the file list from a 'Files:' bullet section, or [].
+
+    Non-path entries (Python symbols, dotted identifiers, etc.) are silently
+    dropped so that only genuine file paths reach the allowlist enforcer.
+    """
     match = _FILES_HEADER.search(body)
     if not match:
         return []
@@ -71,7 +101,7 @@ def _parse_files(body: str) -> list[str]:
             found_item = True
         else:
             break
-    return lines
+    return [entry for entry in lines if _is_file_path(entry)]
 
 
 def _parse_depends_on(body: str, all_numbers: set[int]) -> list[str]:
