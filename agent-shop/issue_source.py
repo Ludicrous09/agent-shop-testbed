@@ -177,11 +177,20 @@ class IssueSource:
         Path to the local git repository (used as cwd for ``gh`` calls).
     label:
         GitHub label that marks issues as ready for the agent.
+    issue_number:
+        When set, fetch only this specific issue number instead of listing
+        all issues with *label*.  The label filter is skipped entirely.
     """
 
-    def __init__(self, repo_path: str | Path = ".", label: str = "agent-ready") -> None:
+    def __init__(
+        self,
+        repo_path: str | Path = ".",
+        label: str = "agent-ready",
+        issue_number: int | None = None,
+    ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.label = label
+        self.issue_number = issue_number
 
     # ------------------------------------------------------------------
     # Public API
@@ -190,6 +199,9 @@ class IssueSource:
     def fetch_tasks(self) -> list[Task]:
         """Fetch open issues with the configured label and return Tasks.
 
+        When *issue_number* is set, fetches only that specific issue (bypassing
+        the label filter).  Otherwise fetches all open issues with *label*.
+
         Before adding each issue as a task, checks whether a merged PR already
         references it.  If so, the issue is auto-closed (with a comment) and
         the task is skipped to prevent duplicate work.
@@ -197,7 +209,10 @@ class IssueSource:
         Dependencies that reference issue numbers not in the fetched set are
         silently dropped.  Results are sorted by priority (lowest = highest).
         """
-        issues = self._gh_list_issues()
+        if self.issue_number is not None:
+            issues = self._gh_view_issue(self.issue_number)
+        else:
+            issues = self._gh_list_issues()
         # One batch call to get all recently-merged PR titles, then do O(1)
         # set-membership checks instead of one gh subprocess per issue.
         merged_issue_numbers = self._fetch_all_merged_prs()
@@ -289,6 +304,14 @@ class IssueSource:
             "--json", "number,title,body,labels",
         ])
         return json.loads(result.stdout)
+
+    def _gh_view_issue(self, number: int) -> list[dict]:
+        """Fetch a single issue by number and return it as a one-element list."""
+        result = self._gh([
+            "issue", "view", str(number),
+            "--json", "number,title,body,labels",
+        ])
+        return [json.loads(result.stdout)]
 
     def _fetch_all_merged_prs(self) -> set[int]:
         """Fetch recently-merged PRs in one gh call and return referenced issue numbers.

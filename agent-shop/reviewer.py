@@ -14,6 +14,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _VALID_SEVERITIES = {"error", "warning", "suggestion"}
+_LARGE_PROMPT_THRESHOLD = 100 * 1024  # 100 KB
 
 REVIEW_PROMPT_TEMPLATE = """\
 You are a thorough but fair code reviewer. Review the following pull request and respond with ONLY a JSON object (no markdown fences, no prose before or after).
@@ -237,16 +238,24 @@ class ReviewAgent:
         )
 
     def _run_claude(self, prompt: str) -> str:
+        use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
         cmd = [
             "claude",
-            "-p",
-            prompt,
             "--dangerously-skip-permissions",
             "--output-format",
             "json",
             "--model",
             self.model,
         ]
+        if use_stdin:
+            stdin_input: str | None = prompt
+            logger.info(
+                "Prompt size %d bytes exceeds threshold; passing via stdin",
+                len(prompt.encode("utf-8")),
+            )
+        else:
+            cmd += ["-p", prompt]
+            stdin_input = None
         logger.info("Running claude (timeout=%ds)", self.timeout)
         try:
             env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -257,6 +266,7 @@ class ReviewAgent:
                 text=True,
                 timeout=self.timeout,
                 env=env,
+                input=stdin_input,
             )
         except subprocess.TimeoutExpired as e:
             raise ReviewError(f"Claude timed out after {self.timeout}s") from e

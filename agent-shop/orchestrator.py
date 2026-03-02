@@ -11,6 +11,7 @@ import sys
 import time
 import traceback
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,19 @@ PROMPTS_PER_TASK = 5
 # Mergeability polling after conflict resolution
 POST_RESOLVE_MERGEABILITY_MAX_RETRIES = 5
 POST_RESOLVE_MERGEABILITY_RETRY_INTERVAL = 3  # seconds
+
+# Type alias for the optional event callback
+EventCallback = Callable[[str, dict], None] | None
+
+
+def _fire_event(on_event: EventCallback, event_type: str, payload: dict) -> None:
+    """Invoke the event callback if set, silently swallowing any exceptions."""
+    if on_event is None:
+        return
+    try:
+        on_event(event_type, payload)
+    except Exception as exc:  # pragma: no cover
+        log.warning("on_event callback raised for %r: %s", event_type, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +597,8 @@ def _review_fix_merge_sync(
     result: WorkerResult,
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     extra_attempts_buffer: int = EXTRA_FIX_ATTEMPTS_BUFFER,
+    on_event: EventCallback = None,
+    task_title: str = "",
 ) -> tuple[bool, str]:
     """Blocking review/fix/merge cycle. Returns (True, '') on success or (False, error_msg) on failure."""
     pr = result.pr_number
@@ -597,16 +613,16 @@ def _review_fix_merge_sync(
     try:
         for attempt in range(abs_max_fixes + 1):
             log.info("Reviewing PR #%d (round %d)", pr, attempt + 1)
+            _fire_event(on_event, "review_started", {"task_id": result.task_id, "pr_number": pr})
             try:
                 reviewer = ReviewAgent(repo_path=repo_path, pr_number=pr)
                 review = reviewer.review()
             except Exception as exc:
-                tb = traceback.format_exc()
-                log.error("ReviewAgent failed for PR #%d: %s", pr, exc)
+                log.error("ReviewAgent failed for PR #%d: %s\n%s", pr, exc, traceback.format_exc())
                 error_msg = (
                     f"**Review step failed** for {pr_url}\n\n"
-                    f"**Error:** {exc}\n\n"
-                    f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+                    f"**Error type:** `{type(exc).__name__}`\n\n"
+                    f"See server logs for full details."
                 )
                 return False, error_msg
 
@@ -621,6 +637,7 @@ def _review_fix_merge_sync(
 
             if review.verdict == "approve":
                 log.info("PR #%d approved — checking mergeability before merge", pr)
+                _fire_event(on_event, "review_approved", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url})
                 # Sleep briefly to allow GitHub to compute merge status after the push
                 time.sleep(2)
 
@@ -786,6 +803,7 @@ def _review_fix_merge_sync(
                     return False, error_msg
 
                 log.info("PR #%d merged — pulling latest main", pr)
+                _fire_event(on_event, "merge_completed", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url})
                 pull = subprocess.run(
                     ["git", "pull"],
                     cwd=repo_path,
@@ -859,6 +877,7 @@ def _review_fix_merge_sync(
                     error_count,
                 )
             prev_error_count = error_count
+            _fire_event(on_event, "review_fix_needed", {"task_id": result.task_id, "pr_number": pr, "attempt": attempt + 1})
 
             log.info(
                 "PR #%d needs changes — running FixAgent (fix %d)",
@@ -869,12 +888,11 @@ def _review_fix_merge_sync(
                 fixer = FixAgent(repo_path=repo_path, pr_number=pr)
                 fix_result = fixer.fix()
             except Exception as exc:
-                tb = traceback.format_exc()
-                log.error("FixAgent raised for PR #%d: %s", pr, exc)
+                log.error("FixAgent raised for PR #%d: %s\n%s", pr, exc, traceback.format_exc())
                 error_msg = (
                     f"**Fix step failed** for {pr_url}\n\n"
-                    f"**Error:** {exc}\n\n"
-                    f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+                    f"**Error type:** `{type(exc).__name__}`\n\n"
+                    f"See server logs for full details."
                 )
                 return False, error_msg
 
@@ -919,10 +937,17 @@ async def run_review_fix_merge(
     repo_path: Path,
     result: WorkerResult,
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
+    on_event: EventCallback = None,
+    task_title: str = "",
 ) -> tuple[bool, str]:
     """Run _review_fix_merge_sync in a thread via run_in_executor."""
     loop = asyncio.get_running_loop()
-    fn = functools.partial(_review_fix_merge_sync, max_fix_attempts=max_fix_attempts)
+    fn = functools.partial(
+        _review_fix_merge_sync,
+        max_fix_attempts=max_fix_attempts,
+        on_event=on_event,
+        task_title=task_title,
+    )
     return await loop.run_in_executor(executor, fn, repo_path, result)
 
 
@@ -1189,6 +1214,7 @@ async def orchestrate(
     timeout: int,
     source: str = "plan",
     label: str = "agent-ready",
+    issue_number: int | None = None,
     max_retries: int = 2,
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     log_dir: str = "./logs",
@@ -1198,6 +1224,7 @@ async def orchestrate(
     max_priority: int | None = None,
     generate_claude_md_flag: bool = False,
     notify: bool = True,
+    on_event: EventCallback = None,
 ) -> None:
     repo = Path(repo_path).resolve()
     # status.json stays local to the orchestrator's working directory,
@@ -1224,8 +1251,11 @@ async def orchestrate(
         await loop.run_in_executor(None, _run_decomposer_pass, repo, label)
 
     if source == "issues":
-        log.info("Fetching tasks from GitHub Issues (label=%s, repo=%s)", label, repo)
-        issue_source = IssueSource(repo_path=repo, label=label)
+        if issue_number is not None:
+            log.info("Fetching single issue #%d from GitHub (repo=%s)", issue_number, repo)
+        else:
+            log.info("Fetching tasks from GitHub Issues (label=%s, repo=%s)", label, repo)
+        issue_source = IssueSource(repo_path=repo, label=label, issue_number=issue_number)
         tasks = issue_source.fetch_tasks()
     else:
         log.info("Loading plan from %s", plan_path)
@@ -1257,6 +1287,7 @@ async def orchestrate(
         )
 
     loop_start = time.monotonic()
+    _fire_event(on_event, "run_started", {"tasks": [t.id for t in tasks], "total": len(tasks)})
 
     try:
         with Live(build_table(state), console=console, refresh_per_second=2) as live:
@@ -1289,12 +1320,27 @@ async def orchestrate(
                                 result.pr_number,
                             )
                             rfm_future = asyncio.ensure_future(
-                                run_review_fix_merge(executor, repo, result, max_fix_attempts=max_fix_attempts)
+                                run_review_fix_merge(
+                                    executor,
+                                    repo,
+                                    result,
+                                    max_fix_attempts=max_fix_attempts,
+                                    on_event=on_event,
+                                    task_title=task_obj.title,
+                                )
                             )
                             state.review_futures[task_id] = rfm_future
                         elif result.success:
                             state.completed_ids.add(task_id)
                             log.info("Task %s completed (no PR)", task_id)
+                            _fire_event(on_event, "task_completed", {
+                                "task_id": task_id,
+                                "title": task_obj.title,
+                                "pr_url": None,
+                                "pr_number": None,
+                                "elapsed": result.elapsed_seconds,
+                                "cost": result.cost_usd,
+                            })
                         else:
                             retry_count = state.retry_counts.get(task_id, 0)
                             if retry_count < state.max_retries:
@@ -1333,6 +1379,11 @@ async def orchestrate(
                                     state.max_retries,
                                     result.error,
                                 )
+                                _fire_event(on_event, "task_failed", {
+                                    "task_id": task_id,
+                                    "title": task_obj.title,
+                                    "error": result.error,
+                                })
                     except Exception as exc:
                         retry_count = state.retry_counts.get(task_id, 0)
                         if retry_count < state.max_retries:
@@ -1360,6 +1411,11 @@ async def orchestrate(
                         else:
                             state.failed_ids.add(task_id)
                             log.error("Task %s raised exception: %s", task_id, exc)
+                            _fire_event(on_event, "task_failed", {
+                                "task_id": task_id,
+                                "title": task_obj.title,
+                                "error": str(exc),
+                            })
 
                     write_status(state, status_path)
                     live.update(build_table(state))
@@ -1371,12 +1427,22 @@ async def orchestrate(
                     future = state.review_futures.pop(task_id)
                     try:
                         merged, error_msg = future.result()
+                        task_result = next((r for r in state.results if r.task_id == task_id), None)
+                        task_title_str = next((t.title for t in tasks if t.id == task_id), "")
                         if merged:
                             state.completed_ids.add(task_id)
                             log.info("Task %s merged successfully", task_id)
+                            _fire_event(on_event, "task_completed", {
+                                "task_id": task_id,
+                                "title": task_title_str,
+                                "pr_url": task_result.pr_url if task_result else None,
+                                "pr_number": task_result.pr_number if task_result else None,
+                                "elapsed": state.task_durations.get(task_id),
+                                "cost": state.task_costs.get(task_id),
+                            })
                             # Close GitHub issue if using issues source
                             if issue_source and task_id.startswith("issue-"):
-                                pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
+                                pr_url = task_result.pr_url if task_result else None
                                 try:
                                     issue_source.mark_complete(task_id, pr_url or "N/A")
                                 except Exception as exc:
@@ -1384,6 +1450,11 @@ async def orchestrate(
                         else:
                             state.failed_ids.add(task_id)
                             log.error("Task %s failed review/fix/merge cycle", task_id)
+                            _fire_event(on_event, "task_failed", {
+                                "task_id": task_id,
+                                "title": task_title_str,
+                                "error": error_msg or "Review/fix/merge cycle failed",
+                            })
                             if issue_source and task_id.startswith("issue-"):
                                 try:
                                     issue_source.mark_failed(task_id, error_msg or "Review/fix/merge cycle failed")
@@ -1393,6 +1464,12 @@ async def orchestrate(
                         tb = traceback.format_exc()
                         state.failed_ids.add(task_id)
                         log.error("Task %s review pipeline raised: %s\n%s", task_id, exc, tb)
+                        task_title_str = next((t.title for t in tasks if t.id == task_id), "")
+                        _fire_event(on_event, "task_failed", {
+                            "task_id": task_id,
+                            "title": task_title_str,
+                            "error": str(exc),
+                        })
                         if issue_source and task_id.startswith("issue-"):
                             pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
                             pr_ref = pr_url or f"task {task_id}"
@@ -1490,6 +1567,7 @@ async def orchestrate(
                     )
                     state.active_workers[task.id] = future
                     state.task_start_times[task.id] = datetime.now(timezone.utc)
+                    _fire_event(on_event, "task_started", {"task_id": task.id, "title": task.title, "worker_id": worker_counter})
                     write_status(state, status_path)
                     live.update(build_table(state))
 
@@ -1516,6 +1594,17 @@ async def orchestrate(
         if r.pr_url:
             console.print(f"  PR: {r.pr_url}")
     write_status(state, status_path)
+    _fire_event(on_event, "run_completed", {
+        "completed": len(state.completed_ids),
+        "failed": len(state.failed_ids),
+        "total_cost": total_cost,
+        "total_elapsed": total_elapsed,
+        "prs": [
+            {"task_id": r.task_id, "pr_url": r.pr_url, "pr_number": r.pr_number}
+            for r in state.results
+            if r.pr_url
+        ],
+    })
 
     if notify:
         wall_clock_elapsed = time.monotonic() - loop_start
@@ -1556,6 +1645,15 @@ def main() -> None:
         "--label",
         default="agent-ready",
         help="GitHub Issues label to use as task source (default: agent-ready)",
+    )
+    parser.add_argument(
+        "--issue",
+        type=int,
+        default=None,
+        help=(
+            "Target a single GitHub issue number instead of all issues with --label. "
+            "Only applies when --source=issues."
+        ),
     )
     parser.add_argument(
         "--timeout",
@@ -1649,6 +1747,7 @@ def main() -> None:
             timeout=args.timeout,
             source=args.source,
             label=args.label,
+            issue_number=args.issue,
             max_retries=args.max_retries,
             max_fix_attempts=args.max_fix_attempts,
             log_dir=args.log_dir,
