@@ -8,6 +8,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_MAKEFILE_TARGET_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_-]*$')
+
 
 # ---------------------------------------------------------------------------
 # Detection helpers
@@ -101,7 +103,7 @@ def detect_frameworks(repo_path: Path) -> list[str]:
                 "starlette": "Starlette",
             }
             for key, name in fw_map.items():
-                pattern = r"(?i)^" + re.escape(key) + r"[^a-zA-Z0-9_-]"
+                pattern = r"^" + re.escape(key) + r"(?:[^a-zA-Z0-9_-]|$)"
                 if re.search(pattern, content, re.MULTILINE):
                     frameworks.append(name)
 
@@ -253,7 +255,7 @@ def detect_build_commands(repo_path: Path) -> list[str]:
             if line and not line.startswith("\t") and not line.startswith("#"):
                 if ":" in line:
                     target = line.split(":")[0].strip()
-                    if target and not target.startswith(".") and re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', target):
+                    if target and not target.startswith(".") and _MAKEFILE_TARGET_RE.match(target):
                         targets.append(target)
         if targets:
             commands.append(f"make  # targets: {', '.join(targets[:8])}")

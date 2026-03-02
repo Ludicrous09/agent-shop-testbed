@@ -295,11 +295,78 @@ def _summarize_review_comment(comment_text: str, filename: str, line: int) -> tu
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    # Fallback: truncate the first sentence
+    return _fallback_comment_title(comment_text, filename)
+
+
+def _fallback_comment_title(comment_text: str, filename: str) -> tuple[str, str]:
+    """Truncate the first sentence as a fallback title. Returns (title_suffix, '')."""
     brief = comment_text.split(".")[0].strip()
     if len(brief) > 57:
         brief = brief[:54] + "..."
     return f"{filename}: {brief}"[:60], ""
+
+
+def _summarize_review_comments_batch(
+    comments: list[tuple[str, str, int]],
+) -> list[tuple[str, str]]:
+    """Use a single Claude CLI call to generate titles and summaries for all comments.
+
+    Takes a list of (comment_text, filename, line) tuples and returns a list of
+    (title_suffix, action_summary) pairs in the same order.
+
+    Falls back to the truncation strategy for all entries if the batch call fails
+    or returns an unexpected response.
+    """
+    if not comments:
+        return []
+
+    comment_blocks = []
+    for i, (text, filename, line) in enumerate(comments, 1):
+        comment_blocks.append(f"[{i}] File: {filename}:{line}\n    Comment: {text}")
+
+    prompt = (
+        "You are summarizing code review comments for GitHub issue titles and bodies.\n\n"
+        "For each comment below, generate a concise title suffix and action summary.\n\n"
+        "Respond with ONLY a JSON array (one object per comment, in the same order):\n"
+        '[{"title": "...", "summary": "..."}, ...]\n\n'
+        "Rules:\n"
+        '- title: under 55 chars, format: "{filename}: <brief description of the fix>"\n'
+        "- summary: 1-2 sentences of what action is needed\n"
+        "- No markdown, no extra text outside the JSON array\n\n"
+        "Comments:\n\n" + "\n\n".join(comment_blocks)
+    )
+
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "text"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_clean_env(),
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw = proc.stdout.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                lines = raw.splitlines()
+                end = -1 if lines[-1].strip() == "```" else len(lines)
+                raw = "\n".join(lines[1:end])
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and len(parsed) == len(comments):
+                results: list[tuple[str, str]] = []
+                for item, (text, filename, _line) in zip(parsed, comments):
+                    title = str(item.get("title", "")).strip()
+                    summary = str(item.get("summary", "")).strip()
+                    if title and len(title) <= 80:
+                        results.append((title, summary))
+                    else:
+                        results.append(_fallback_comment_title(text, filename))
+                return results
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Fallback for all comments
+    return [_fallback_comment_title(text, filename) for text, filename, _line in comments]
 
 
 def _check_label_exists(repo_path: Path, label_name: str) -> bool:
@@ -387,10 +454,11 @@ def _create_followup_issues(
     priority_label_exists = _check_label_exists(repo_path, "priority:3")
     pr_title = _get_pr_title(repo_path, pr_number)
 
+    # Collect all qualifying comments first so we can batch-summarize them
+    qualifying: list = []
     for comment in review.comments:
         if comment.severity not in ("warning", "suggestion"):
             continue
-
         text = comment.comment.strip()
         if len(text) < 20:
             log.debug(
@@ -400,11 +468,17 @@ def _create_followup_issues(
                 comment.line,
             )
             continue
+        qualifying.append(comment)
 
-        # Use Claude to generate a concise title and action summary
-        title_suffix, action_summary = _summarize_review_comment(
-            text, comment.file, comment.line
-        )
+    if not qualifying:
+        return created_urls
+
+    # Single Claude call for all comments instead of one subprocess per comment
+    batch_input = [(c.comment.strip(), c.file, c.line) for c in qualifying]
+    batch_results = _summarize_review_comments_batch(batch_input)
+
+    for comment, (title_suffix, action_summary) in zip(qualifying, batch_results):
+        text = comment.comment.strip()
         title = f"[Review Follow-up] {title_suffix}"
         if len(title) > 80:
             title = title[:77] + "..."
@@ -717,6 +791,7 @@ def _review_fix_merge_sync(
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    timeout=120,
                 )
                 if pull.returncode != 0:
                     log.warning("git pull after merge failed: %s", pull.stderr[:300])
@@ -952,6 +1027,7 @@ def _cleanup_failed_branch(repo_path: Path, branch: str) -> None:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if remote_result.returncode != 0:
         log.warning(
@@ -965,6 +1041,7 @@ def _cleanup_failed_branch(repo_path: Path, branch: str) -> None:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if local_result.returncode != 0:
         log.warning(
@@ -1181,62 +1258,95 @@ async def orchestrate(
 
     loop_start = time.monotonic()
 
-    with Live(build_table(state), console=console, refresh_per_second=2) as live:
-        while True:
-            # Check for completed worker futures
-            done_ids = [tid for tid, f in state.active_workers.items() if f.done()]
+    try:
+        with Live(build_table(state), console=console, refresh_per_second=2) as live:
+            while True:
+                # Check for completed worker futures
+                done_ids = [tid for tid, f in state.active_workers.items() if f.done()]
 
-            for task_id in done_ids:
-                future = state.active_workers.pop(task_id)
-                task_obj = next(t for t in tasks if t.id == task_id)
+                for task_id in done_ids:
+                    future = state.active_workers.pop(task_id)
+                    task_obj = next(t for t in tasks if t.id == task_id)
 
-                # Remove files from active set
-                for f in task_obj.files_touched:
-                    state.active_files.discard(f)
+                    # Remove files from active set
+                    for f in task_obj.files_touched:
+                        state.active_files.discard(f)
 
-                try:
-                    result: WorkerResult = future.result()
-                    state.results.append(result)
-                    # Record elapsed time and cost from the finished worker
-                    state.task_durations[task_id] = result.elapsed_seconds
-                    if result.cost_usd is not None:
-                        state.task_costs[task_id] = result.cost_usd
-                    if result.num_turns is not None:
-                        state.task_prompts[task_id] = result.num_turns
-                    if result.success and result.pr_number is not None:
-                        # Launch review/fix/merge pipeline
-                        log.info(
-                            "Task %s created PR #%d — launching review pipeline",
-                            task_id,
-                            result.pr_number,
-                        )
-                        rfm_future = asyncio.ensure_future(
-                            run_review_fix_merge(executor, repo, result, max_fix_attempts=max_fix_attempts)
-                        )
-                        state.review_futures[task_id] = rfm_future
-                    elif result.success:
-                        state.completed_ids.add(task_id)
-                        log.info("Task %s completed (no PR)", task_id)
-                    else:
+                    try:
+                        result: WorkerResult = future.result()
+                        state.results.append(result)
+                        # Record elapsed time and cost from the finished worker
+                        state.task_durations[task_id] = result.elapsed_seconds
+                        if result.cost_usd is not None:
+                            state.task_costs[task_id] = result.cost_usd
+                        if result.num_turns is not None:
+                            state.task_prompts[task_id] = result.num_turns
+                        if result.success and result.pr_number is not None:
+                            # Launch review/fix/merge pipeline
+                            log.info(
+                                "Task %s created PR #%d — launching review pipeline",
+                                task_id,
+                                result.pr_number,
+                            )
+                            rfm_future = asyncio.ensure_future(
+                                run_review_fix_merge(executor, repo, result, max_fix_attempts=max_fix_attempts)
+                            )
+                            state.review_futures[task_id] = rfm_future
+                        elif result.success:
+                            state.completed_ids.add(task_id)
+                            log.info("Task %s completed (no PR)", task_id)
+                        else:
+                            retry_count = state.retry_counts.get(task_id, 0)
+                            if retry_count < state.max_retries:
+                                retry_n = retry_count + 1
+                                state.retry_counts[task_id] = retry_n
+                                log.warning(
+                                    "Task %s failed (attempt %d/%d): %s — retrying",
+                                    task_id,
+                                    retry_n,
+                                    state.max_retries + 1,
+                                    result.error,
+                                )
+                                _cleanup_failed_branch(repo, result.branch)
+                                branch_suffix = f"-retry-{retry_n}"
+                                worker_counter += 1
+                                log.info(
+                                    "Spawning retry worker for task %s (suffix=%s)",
+                                    task_id,
+                                    branch_suffix,
+                                )
+                                state.active_files.update(task_obj.files_touched)
+                                retry_future = asyncio.ensure_future(
+                                    run_worker(
+                                        executor, state, task_obj, worker_counter,
+                                        branch_suffix, use_architect=architect,
+                                    )
+                                )
+                                state.active_workers[task_id] = retry_future
+                                state.task_durations.pop(task_id, None)
+                                state.task_start_times[task_id] = datetime.now(timezone.utc)
+                            else:
+                                state.failed_ids.add(task_id)
+                                log.error(
+                                    "Task %s failed after %d retries: %s",
+                                    task_id,
+                                    state.max_retries,
+                                    result.error,
+                                )
+                    except Exception as exc:
                         retry_count = state.retry_counts.get(task_id, 0)
                         if retry_count < state.max_retries:
                             retry_n = retry_count + 1
                             state.retry_counts[task_id] = retry_n
                             log.warning(
-                                "Task %s failed (attempt %d/%d): %s — retrying",
+                                "Task %s raised exception (attempt %d/%d): %s — retrying",
                                 task_id,
                                 retry_n,
                                 state.max_retries + 1,
-                                result.error,
+                                exc,
                             )
-                            _cleanup_failed_branch(repo, result.branch)
                             branch_suffix = f"-retry-{retry_n}"
                             worker_counter += 1
-                            log.info(
-                                "Spawning retry worker for task %s (suffix=%s)",
-                                task_id,
-                                branch_suffix,
-                            )
                             state.active_files.update(task_obj.files_touched)
                             retry_future = asyncio.ensure_future(
                                 run_worker(
@@ -1249,176 +1359,145 @@ async def orchestrate(
                             state.task_start_times[task_id] = datetime.now(timezone.utc)
                         else:
                             state.failed_ids.add(task_id)
-                            log.error(
-                                "Task %s failed after %d retries: %s",
-                                task_id,
-                                state.max_retries,
-                                result.error,
-                            )
-                except Exception as exc:
-                    retry_count = state.retry_counts.get(task_id, 0)
-                    if retry_count < state.max_retries:
-                        retry_n = retry_count + 1
-                        state.retry_counts[task_id] = retry_n
-                        log.warning(
-                            "Task %s raised exception (attempt %d/%d): %s — retrying",
-                            task_id,
-                            retry_n,
-                            state.max_retries + 1,
-                            exc,
-                        )
-                        branch_suffix = f"-retry-{retry_n}"
-                        worker_counter += 1
-                        state.active_files.update(task_obj.files_touched)
-                        retry_future = asyncio.ensure_future(
-                            run_worker(
-                                executor, state, task_obj, worker_counter,
-                                branch_suffix, use_architect=architect,
-                            )
-                        )
-                        state.active_workers[task_id] = retry_future
-                        state.task_durations.pop(task_id, None)
-                        state.task_start_times[task_id] = datetime.now(timezone.utc)
-                    else:
+                            log.error("Task %s raised exception: %s", task_id, exc)
+
+                    write_status(state, status_path)
+                    live.update(build_table(state))
+
+                # Check for completed review/fix/merge futures
+                done_review_ids = [tid for tid, f in state.review_futures.items() if f.done()]
+
+                for task_id in done_review_ids:
+                    future = state.review_futures.pop(task_id)
+                    try:
+                        merged, error_msg = future.result()
+                        if merged:
+                            state.completed_ids.add(task_id)
+                            log.info("Task %s merged successfully", task_id)
+                            # Close GitHub issue if using issues source
+                            if issue_source and task_id.startswith("issue-"):
+                                pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
+                                try:
+                                    issue_source.mark_complete(task_id, pr_url or "N/A")
+                                except Exception as exc:
+                                    log.warning("Failed to close issue for %s: %s", task_id, exc)
+                        else:
+                            state.failed_ids.add(task_id)
+                            log.error("Task %s failed review/fix/merge cycle", task_id)
+                            if issue_source and task_id.startswith("issue-"):
+                                try:
+                                    issue_source.mark_failed(task_id, error_msg or "Review/fix/merge cycle failed")
+                                except Exception as exc:
+                                    log.warning("Failed to mark issue failed for %s: %s", task_id, exc)
+                    except Exception as exc:
+                        tb = traceback.format_exc()
                         state.failed_ids.add(task_id)
-                        log.error("Task %s raised exception: %s", task_id, exc)
-
-                write_status(state, status_path)
-                live.update(build_table(state))
-
-            # Check for completed review/fix/merge futures
-            done_review_ids = [tid for tid, f in state.review_futures.items() if f.done()]
-
-            for task_id in done_review_ids:
-                future = state.review_futures.pop(task_id)
-                try:
-                    merged, error_msg = future.result()
-                    if merged:
-                        state.completed_ids.add(task_id)
-                        log.info("Task %s merged successfully", task_id)
-                        # Close GitHub issue if using issues source
+                        log.error("Task %s review pipeline raised: %s\n%s", task_id, exc, tb)
                         if issue_source and task_id.startswith("issue-"):
                             pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
+                            pr_ref = pr_url or f"task {task_id}"
+                            error_msg = (
+                                f"**Review step failed** for {pr_ref}\n\n"
+                                f"**Error type:** `{type(exc).__name__}`\n\n"
+                                f"See server logs for details."
+                            )
                             try:
-                                issue_source.mark_complete(task_id, pr_url or "N/A")
-                            except Exception as exc:
-                                log.warning("Failed to close issue for %s: %s", task_id, exc)
-                    else:
-                        state.failed_ids.add(task_id)
-                        log.error("Task %s failed review/fix/merge cycle", task_id)
-                        if issue_source and task_id.startswith("issue-"):
-                            try:
-                                issue_source.mark_failed(task_id, error_msg or "Review/fix/merge cycle failed")
-                            except Exception as exc:
-                                log.warning("Failed to mark issue failed for %s: %s", task_id, exc)
-                except Exception as exc:
-                    tb = traceback.format_exc()
-                    state.failed_ids.add(task_id)
-                    log.error("Task %s review pipeline raised: %s\n%s", task_id, exc, tb)
-                    if issue_source and task_id.startswith("issue-"):
-                        pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
-                        pr_ref = pr_url or f"task {task_id}"
-                        error_msg = (
-                            f"**Review step failed** for {pr_ref}\n\n"
-                            f"**Error type:** `{type(exc).__name__}`\n\n"
-                            f"See server logs for details."
-                        )
-                        try:
-                            issue_source.mark_failed(task_id, error_msg)
-                        except Exception as mark_exc:
-                            log.warning("Failed to mark issue failed for %s: %s", task_id, mark_exc)
+                                issue_source.mark_failed(task_id, error_msg)
+                            except Exception as mark_exc:
+                                log.warning("Failed to mark issue failed for %s: %s", task_id, mark_exc)
 
-                write_status(state, status_path)
-                live.update(build_table(state))
+                    write_status(state, status_path)
+                    live.update(build_table(state))
 
-            # Check if current priority group is complete; advance to next if so
-            if sorted_priorities and current_priority_idx < len(sorted_priorities):
-                current_priority = sorted_priorities[current_priority_idx]
-                current_group_ids = {t.id for t in priority_groups[current_priority]}
-                group_settled = current_group_ids & (state.completed_ids | state.failed_ids)
-                group_in_flight = current_group_ids & (
-                    set(state.active_workers) | set(state.review_futures)
-                )
-
-                if len(group_settled) == len(current_group_ids) and not group_in_flight:
-                    group_completed = len(current_group_ids & state.completed_ids)
-                    group_failed = len(current_group_ids & state.failed_ids)
-                    log.info(
-                        "Priority %d complete: %d succeeded, %d failed",
-                        current_priority,
-                        group_completed,
-                        group_failed,
+                # Check if current priority group is complete; advance to next if so
+                if sorted_priorities and current_priority_idx < len(sorted_priorities):
+                    current_priority = sorted_priorities[current_priority_idx]
+                    current_group_ids = {t.id for t in priority_groups[current_priority]}
+                    group_settled = current_group_ids & (state.completed_ids | state.failed_ids)
+                    group_in_flight = current_group_ids & (
+                        set(state.active_workers) | set(state.review_futures)
                     )
-                    if max_priority is not None and current_priority >= max_priority:
+
+                    if len(group_settled) == len(current_group_ids) and not group_in_flight:
+                        group_completed = len(current_group_ids & state.completed_ids)
+                        group_failed = len(current_group_ids & state.failed_ids)
                         log.info(
-                            "Stopping after priority %d (--max-priority)",
+                            "Priority %d complete: %d succeeded, %d failed",
                             current_priority,
+                            group_completed,
+                            group_failed,
                         )
-                        break
-                    if current_priority_idx + 1 < len(sorted_priorities):
-                        current_priority_idx += 1
-                        state.current_priority = sorted_priorities[current_priority_idx]
-                        log.info(
-                            "Advancing to priority group %d (%d tasks)",
-                            state.current_priority,
-                            len(priority_groups[state.current_priority]),
-                        )
-                        write_status(state, status_path)
-                        live.update(build_table(state))
+                        if max_priority is not None and current_priority >= max_priority:
+                            log.info(
+                                "Stopping after priority %d (--max-priority)",
+                                current_priority,
+                            )
+                            break
+                        if current_priority_idx + 1 < len(sorted_priorities):
+                            current_priority_idx += 1
+                            state.current_priority = sorted_priorities[current_priority_idx]
+                            log.info(
+                                "Advancing to priority group %d (%d tasks)",
+                                state.current_priority,
+                                len(priority_groups[state.current_priority]),
+                            )
+                            write_status(state, status_path)
+                            live.update(build_table(state))
 
-            # Are we done?
-            all_settled = state.completed_ids | state.failed_ids
-            if len(all_settled) == state.total:
-                log.info("All tasks settled — exiting")
-                break
+                # Are we done?
+                all_settled = state.completed_ids | state.failed_ids
+                if len(all_settled) == state.total:
+                    log.info("All tasks settled — exiting")
+                    break
 
-            # Determine ready tasks for the current priority group
-            if sorted_priorities and current_priority_idx < len(sorted_priorities):
-                current_priority = sorted_priorities[current_priority_idx]
-                current_group_ids = {t.id for t in priority_groups[current_priority]}
-            else:
-                current_group_ids = set()
+                # Determine ready tasks for the current priority group
+                if sorted_priorities and current_priority_idx < len(sorted_priorities):
+                    current_priority = sorted_priorities[current_priority_idx]
+                    current_group_ids = {t.id for t in priority_groups[current_priority]}
+                else:
+                    current_group_ids = set()
 
-            ready = get_ready_tasks(
-                tasks,
-                state.completed_ids,
-                state.active_files,
-            )
-            # Filter to current priority group and exclude already-active/settled tasks
-            ready = [
-                t for t in ready
-                if t.id in current_group_ids
-                and t.id not in state.active_workers
-                and t.id not in state.failed_ids
-                and t.id not in state.review_futures
-                and t.id not in state.completed_ids
-            ]
-
-            # Safety exit: nothing running, nothing to spawn — avoid infinite loop
-            if state.active == 0 and state.reviewing == 0 and not ready:
-                log.info("No active workers, no reviews pending, no tasks ready — exiting")
-                break
-
-            slots = max_workers - state.active
-            for task in ready[:slots]:
-                worker_counter += 1
-                log.info("Spawning worker for task %s", task.id)
-                state.active_files.update(task.files_touched)
-                future = asyncio.ensure_future(
-                    run_worker(
-                        executor, state, task, worker_counter,
-                        use_architect=architect,
-                    )
+                ready = get_ready_tasks(
+                    tasks,
+                    state.completed_ids,
+                    state.active_files,
                 )
-                state.active_workers[task.id] = future
-                state.task_start_times[task.id] = datetime.now(timezone.utc)
-                write_status(state, status_path)
-                live.update(build_table(state))
+                # Filter to current priority group and exclude already-active/settled tasks
+                ready = [
+                    t for t in ready
+                    if t.id in current_group_ids
+                    and t.id not in state.active_workers
+                    and t.id not in state.failed_ids
+                    and t.id not in state.review_futures
+                    and t.id not in state.completed_ids
+                ]
 
-            # Brief sleep to avoid busy-looping
-            await asyncio.sleep(2)
+                # Safety exit: nothing running, nothing to spawn — avoid infinite loop
+                if state.active == 0 and state.reviewing == 0 and not ready:
+                    log.info("No active workers, no reviews pending, no tasks ready — exiting")
+                    break
 
-    executor.shutdown(wait=False)
+                slots = max_workers - state.active
+                for task in ready[:slots]:
+                    worker_counter += 1
+                    log.info("Spawning worker for task %s", task.id)
+                    state.active_files.update(task.files_touched)
+                    future = asyncio.ensure_future(
+                        run_worker(
+                            executor, state, task, worker_counter,
+                            use_architect=architect,
+                        )
+                    )
+                    state.active_workers[task.id] = future
+                    state.task_start_times[task.id] = datetime.now(timezone.utc)
+                    write_status(state, status_path)
+                    live.update(build_table(state))
+
+                # Brief sleep to avoid busy-looping
+                await asyncio.sleep(2)
+
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
     # Final summary
     console.print()
@@ -1496,7 +1575,7 @@ def main() -> None:
         default=MAX_FIX_ATTEMPTS,
         help=(
             f"Max fix attempts per PR review cycle (default: {MAX_FIX_ATTEMPTS}). "
-            "When the agent is making progress (fewer errors each round), up to 3 "
+            f"When the agent is making progress (fewer errors each round), up to {EXTRA_FIX_ATTEMPTS_BUFFER} "
             "extra attempts are allowed beyond this limit."
         ),
     )

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,11 +64,13 @@ class FixAgent:
         pr_number: int,
         model: str = "sonnet",
         timeout: int = 300,
+        max_turns: int = 30,
     ):
         self.repo_path = Path(repo_path).resolve()
         self.pr_number = pr_number
         self.model = model
         self.timeout = timeout
+        self.max_turns = max_turns
         self._owner, self._repo = self._parse_remote()
         self._worktree_path = WORKTREE_BASE / f"fix-{pr_number}"
         logger.info(
@@ -86,10 +89,12 @@ class FixAgent:
         logger.info("Starting fix for PR #%d", self.pr_number)
 
         try:
-            review_feedback = self._get_review_feedback()
+            pr_data = self._fetch_pr_data()
+
+            review_feedback = self._get_review_feedback(pr_data)
             logger.info("Got review feedback (%d chars)", len(review_feedback))
 
-            head_branch = self._get_head_branch()
+            head_branch = self._get_head_branch(pr_data)
             logger.info("PR head branch: %s", head_branch)
 
             self._fetch_remote()
@@ -132,10 +137,20 @@ class FixAgent:
     # Step implementations
     # ------------------------------------------------------------------
 
-    def _get_review_feedback(self) -> str:
-        output = self._run_gh(["pr", "view", str(self.pr_number), "--json", "comments"])
-        data = json.loads(output)
-        comments = data.get("comments", [])
+    def _fetch_pr_data(self) -> dict:
+        """Fetch all required PR fields in a single gh pr view call."""
+        output = self._run_gh(
+            ["pr", "view", str(self.pr_number), "--json", "comments,headRefName"]
+        )
+        return json.loads(output)
+
+    def _get_review_feedback(self, pr_data: dict | None = None) -> str:
+        if pr_data is None:
+            output = self._run_gh(
+                ["pr", "view", str(self.pr_number), "--json", "comments"]
+            )
+            pr_data = json.loads(output)
+        comments = pr_data.get("comments", [])
 
         tag = "[REVIEW: REQUEST_CHANGES]"
         for comment in reversed(comments):
@@ -166,12 +181,13 @@ class FixAgent:
             f"No comment containing '{tag}' found on PR #{self.pr_number}"
         )
 
-    def _get_head_branch(self) -> str:
-        output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "headRefName"]
-        )
-        data = json.loads(output)
-        return data["headRefName"]
+    def _get_head_branch(self, pr_data: dict | None = None) -> str:
+        if pr_data is None:
+            output = self._run_gh(
+                ["pr", "view", str(self.pr_number), "--json", "headRefName"]
+            )
+            pr_data = json.loads(output)
+        return pr_data["headRefName"]
 
     def _fetch_remote(self) -> None:
         logger.info("Fetching remote to ensure head branch is available locally")
@@ -240,6 +256,8 @@ class FixAgent:
             "json",
             "--model",
             self.model,
+            "--max-turns",
+            str(self.max_turns),
         ]
         logger.info("Running claude in worktree (timeout=%ds)", self.timeout)
         try:
@@ -347,17 +365,36 @@ class FixAgent:
 
     def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh"] + args
-        proc = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
+        delays = [5, 15, 30]
+        for attempt in range(3):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise FixError(
+                    f"gh {' '.join(args)} timed out after {self.timeout}s"
+                ) from exc
+            if proc.returncode == 0:
+                return proc.stdout
+            if attempt < 2 and (
+                "rate limit" in proc.stderr.lower() or "429" in proc.stderr
+            ):
+                logger.warning(
+                    "gh rate limit hit, retrying in %ds (attempt %d/3)",
+                    delays[attempt],
+                    attempt + 1,
+                )
+                time.sleep(delays[attempt])
+                continue
             raise FixError(
                 f"gh {' '.join(args)} failed (code {proc.returncode}): {proc.stderr[:500]}"
             )
-        return proc.stdout
+        raise FixError(f"gh {' '.join(args)} failed after retries")
 
     def _parse_remote(self) -> tuple[str, str]:
         proc = subprocess.run(

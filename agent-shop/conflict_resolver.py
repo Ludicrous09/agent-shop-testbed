@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,12 +87,14 @@ class ConflictResolver:
     def resolve(self) -> ConflictResult:
         logger.info("Checking PR #%d for merge conflicts", self.pr_number)
         try:
-            if not self._has_conflicts():
+            pr_data = self._fetch_pr_data()
+
+            if not self._has_conflicts(pr_data):
                 logger.info("PR #%d has no merge conflicts", self.pr_number)
                 return ConflictResult(success=True, pr_number=self.pr_number)
 
-            head_branch = self._get_head_branch()
-            base_branch = self._get_base_branch()
+            head_branch = self._get_head_branch(pr_data)
+            base_branch = self._get_base_branch(pr_data)
             logger.info("PR head branch: %s  base branch: %s", head_branch, base_branch)
 
             self._fetch_remote()
@@ -104,7 +107,7 @@ class ConflictResolver:
 
             logger.info("Conflicted files: %s", conflicted_files)
 
-            pr_description = self._get_pr_description()
+            pr_description = self._get_pr_description(pr_data)
             main_changes = self._get_main_changes_since_branch(base_branch)
 
             resolved: list[str] = []
@@ -144,12 +147,18 @@ class ConflictResolver:
     # Step implementations
     # ------------------------------------------------------------------
 
-    def _has_conflicts(self) -> bool:
+    def _fetch_pr_data(self) -> dict:
+        """Fetch all required PR fields in a single gh pr view call."""
         output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "mergeable"]
+            [
+                "pr", "view", str(self.pr_number),
+                "--json", "mergeable,headRefName,baseRefName,body,title",
+            ]
         )
-        data = json.loads(output)
-        mergeable = data.get("mergeable", "UNKNOWN")
+        return json.loads(output)
+
+    def _has_conflicts(self, pr_data: dict) -> bool:
+        mergeable = pr_data.get("mergeable", "UNKNOWN")
         logger.info("PR #%d mergeable status: %s", self.pr_number, mergeable)
         if mergeable == "UNKNOWN":
             raise MergeabilityUnknownError(
@@ -158,27 +167,15 @@ class ConflictResolver:
             )
         return mergeable == "CONFLICTING"
 
-    def _get_head_branch(self) -> str:
-        output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "headRefName"]
-        )
-        data = json.loads(output)
-        return data["headRefName"]
+    def _get_head_branch(self, pr_data: dict) -> str:
+        return pr_data["headRefName"]
 
-    def _get_base_branch(self) -> str:
-        output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "baseRefName"]
-        )
-        data = json.loads(output)
-        return data["baseRefName"]
+    def _get_base_branch(self, pr_data: dict) -> str:
+        return pr_data["baseRefName"]
 
-    def _get_pr_description(self) -> str:
-        output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "body,title"]
-        )
-        data = json.loads(output)
-        title = data.get("title", "")
-        body = data.get("body", "")
+    def _get_pr_description(self, pr_data: dict) -> str:
+        title = pr_data.get("title", "")
+        body = pr_data.get("body", "")
         return f"**{title}**\n\n{body}".strip() or "No description provided."
 
     def _fetch_remote(self) -> None:
@@ -397,41 +394,75 @@ class ConflictResolver:
 
     def _commit_and_push(self, branch: str, resolved_files: list[str]) -> None:
         """Stage resolved files, commit the merge, and push."""
-        for file_path in resolved_files:
+        committed = False
+        try:
+            for file_path in resolved_files:
+                proc = subprocess.run(
+                    ["git", "add", file_path],
+                    cwd=self._worktree_path,
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode != 0:
+                    raise ConflictError(
+                        f"git add failed for {file_path} (code {proc.returncode}): {proc.stderr[:300]}"
+                    )
+
             proc = subprocess.run(
-                ["git", "add", file_path],
+                ["git", "commit", "-m", "[agent] fix: resolve merge conflicts"],
                 cwd=self._worktree_path,
                 capture_output=True,
                 text=True,
             )
             if proc.returncode != 0:
                 raise ConflictError(
-                    f"git add failed for {file_path} (code {proc.returncode}): {proc.stderr[:300]}"
+                    f"git commit failed (code {proc.returncode}): {proc.stderr[:300]}"
                 )
+            committed = True
+            logger.info("Committed resolved conflicts")
 
-        proc = subprocess.run(
-            ["git", "commit", "-m", "[agent] fix: resolve merge conflicts"],
-            cwd=self._worktree_path,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise ConflictError(
-                f"git commit failed (code {proc.returncode}): {proc.stderr[:300]}"
+            proc = subprocess.run(
+                ["git", "push", "origin", f"HEAD:{branch}"],
+                cwd=self._worktree_path,
+                capture_output=True,
+                text=True,
             )
-        logger.info("Committed resolved conflicts")
-
-        proc = subprocess.run(
-            ["git", "push", "origin", f"HEAD:{branch}"],
-            cwd=self._worktree_path,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise ConflictError(
-                f"git push failed (code {proc.returncode}): {proc.stderr[:500]}"
-            )
-        logger.info("Pushed resolved conflicts to %s", branch)
+            if proc.returncode != 0:
+                raise ConflictError(
+                    f"git push failed (code {proc.returncode}): {proc.stderr[:500]}"
+                )
+            logger.info("Pushed resolved conflicts to %s", branch)
+        except Exception:
+            # Reset the worktree so _cleanup_worktree() sees a clean index.
+            # The correct reset target depends on whether the commit succeeded:
+            #
+            #  • Before commit: a merge is still in progress (MERGE_HEAD exists).
+            #    Abort it, then hard-reset to HEAD (the pre-merge commit).
+            #
+            #  • After commit: the merge is already finalised, so MERGE_HEAD is
+            #    gone and `git merge --abort` would fail.  ORIG_HEAD still points
+            #    to the pre-merge commit, so reset there to remove the dangling
+            #    merge commit and restore the branch to its original state.
+            if committed:
+                subprocess.run(
+                    ["git", "reset", "--hard", "ORIG_HEAD"],
+                    cwd=self._worktree_path,
+                    capture_output=True,
+                )
+            else:
+                merge_head = self._worktree_path / ".git" / "MERGE_HEAD"
+                if merge_head.exists():
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=self._worktree_path,
+                        capture_output=True,
+                    )
+                subprocess.run(
+                    ["git", "reset", "--hard", "HEAD"],
+                    cwd=self._worktree_path,
+                    capture_output=True,
+                )
+            raise
 
     def _post_comment(self, resolved_files: list[str]) -> None:
         files_list = "\n".join(f"- `{f}`" for f in resolved_files)
@@ -487,23 +518,36 @@ class ConflictResolver:
 
     def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh"] + args
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ConflictError(
-                f"gh {' '.join(args)} timed out after {self.timeout}s"
-            ) from exc
-        if proc.returncode != 0:
+        delays = [5, 15, 30]
+        for attempt in range(3):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ConflictError(
+                    f"gh {' '.join(args)} timed out after {self.timeout}s"
+                ) from exc
+            if proc.returncode == 0:
+                return proc.stdout
+            if attempt < 2 and (
+                "rate limit" in proc.stderr.lower() or "429" in proc.stderr
+            ):
+                logger.warning(
+                    "gh rate limit hit, retrying in %ds (attempt %d/3)",
+                    delays[attempt],
+                    attempt + 1,
+                )
+                time.sleep(delays[attempt])
+                continue
             raise ConflictError(
                 f"gh {' '.join(args)} failed (code {proc.returncode}): {proc.stderr[:500]}"
             )
-        return proc.stdout
+        raise ConflictError(f"gh {' '.join(args)} failed after retries")
 
 
 # ---------------------------------------------------------------------------

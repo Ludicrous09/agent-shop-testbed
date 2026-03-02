@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,6 +127,7 @@ class Worker:
             cwd=self.repo_path,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if pull.returncode != 0:
             logger.warning("git pull on main failed: %s", pull.stderr[:300])
@@ -193,9 +195,11 @@ class Worker:
             raise WorkerError(f"Claude timed out after {self.timeout}s") from e
 
         if proc.returncode != 0:
-            self._log(f"claude stderr: {proc.stderr}")
+            logger.error(
+                "Claude stderr for task %s: %s", self.task.id, proc.stderr[:500]
+            )
             raise WorkerError(
-                f"Claude exited with code {proc.returncode}: {proc.stderr[:500]}"
+                f"Claude exited with code {proc.returncode} — check server logs for details"
             )
 
         output = proc.stdout
@@ -256,12 +260,14 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         staged_result = subprocess.run(
             ["git", "diff", "--name-only", "--cached"],
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         # Also check committed changes vs main
         committed_result = subprocess.run(
@@ -269,6 +275,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         # Catch untracked files created but never staged
         untracked_result = subprocess.run(
@@ -276,6 +283,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
 
         changed = set()
@@ -314,6 +322,7 @@ class Worker:
                 cwd=self.worktree_path,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
             if cat_file.returncode == 0:
                 # File exists in main — restore it to the main version.
@@ -328,6 +337,7 @@ class Worker:
                     cwd=self.worktree_path,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
                 if revert.returncode != 0:
                     logger.warning(
@@ -344,6 +354,7 @@ class Worker:
                     cwd=self.worktree_path,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
 
     def _verify_changes(self) -> list[str]:
@@ -353,13 +364,16 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         if status.stdout.strip():
             logger.warning(
                 "Found uncommitted changes, auto-committing for task %s", self.task.id
             )
-            subprocess.run(["git", "add", "-A"], cwd=self.worktree_path, check=True)
             subprocess.run(
+                ["git", "add", "-A"], cwd=self.worktree_path, check=True, timeout=60
+            )
+            proc = subprocess.run(
                 [
                     "git",
                     "commit",
@@ -369,7 +383,10 @@ class Worker:
                 cwd=self.worktree_path,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
+            if proc.returncode != 0:
+                raise WorkerError(f"Auto-commit failed: {proc.stderr[:300]}")
 
         # Verify we have commits ahead of main
         log_result = subprocess.run(
@@ -377,6 +394,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         if not log_result.stdout.strip():
             raise WorkerError("No commits ahead of main — nothing to push")
@@ -389,6 +407,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         files_changed = [f for f in diff_result.stdout.strip().splitlines() if f]
         logger.info(
@@ -552,9 +571,13 @@ class Worker:
         )
 
         if proc.returncode != 0:
+            logger.error(
+                "Claude conflict resolution stderr for task %s: %s",
+                self.task.id,
+                proc.stderr[:500],
+            )
             raise WorkerError(
-                f"Claude conflict resolution exited with {proc.returncode}:"
-                f" {proc.stderr[:300]}"
+                f"Claude conflict resolution exited with {proc.returncode} — check server logs for details"
             )
 
         # Verify no conflicts remain
@@ -576,15 +599,30 @@ class Worker:
 
     def _push(self) -> None:
         logger.info("Pushing branch %s to origin", self.branch)
-        result = subprocess.run(
-            ["git", "push", "-u", "origin", self.branch, "--force"],
-            cwd=self.worktree_path,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise WorkerError(f"git push failed: {result.stderr[:500]}")
-        self._log(f"Pushed branch {self.branch}")
+        delays = [5, 15, 45]
+        last_stderr = ""
+        for attempt, delay in enumerate(delays, start=1):
+            result = subprocess.run(
+                ["git", "push", "-u", "origin", self.branch, "--force"],
+                cwd=self.worktree_path,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                self._log(f"Pushed branch {self.branch}")
+                return
+            last_stderr = result.stderr[:500]
+            if attempt < len(delays):
+                logger.warning(
+                    "git push failed (attempt %d/%d), retrying in %ds: %s",
+                    attempt,
+                    len(delays),
+                    delay,
+                    last_stderr,
+                )
+                time.sleep(delay)
+        logger.error("git push failed for task %s: %s", self.task.id, last_stderr)
+        raise WorkerError(f"git push failed after {len(delays)} attempts — check server logs for details")
 
     def _create_pr(self, result: WorkerResult) -> tuple[str, int]:
         title = f"[Agent] {self.task.title}"
@@ -622,16 +660,37 @@ class Worker:
         if label:
             cmd.extend(["--label", label])
 
-        proc = subprocess.run(
-            cmd,
-            cwd=self.worktree_path,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            self._log(f"gh pr create failed: {proc.stderr}")
-            return None
-        return proc.stdout.strip()
+        delays = [5, 15, 45]
+        for attempt, delay in enumerate(delays, start=1):
+            proc = subprocess.run(
+                cmd,
+                cwd=self.worktree_path,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                return proc.stdout.strip()
+            stderr = proc.stderr
+            # Non-transient failure: label doesn't exist — signal caller to retry without label
+            if label and "could not find label" in stderr.lower():
+                self._log(f"gh pr create failed: {stderr}")
+                return None
+            # Non-transient failure: PR already exists
+            if "already exists" in stderr.lower():
+                self._log(f"gh pr create failed: {stderr}")
+                return None
+            if attempt < len(delays):
+                logger.warning(
+                    "gh pr create failed (attempt %d/%d), retrying in %ds: %s",
+                    attempt,
+                    len(delays),
+                    delay,
+                    stderr[:500],
+                )
+                time.sleep(delay)
+            else:
+                self._log(f"gh pr create failed: {stderr}")
+        return None
 
     def _cleanup(self) -> None:
         if self.worktree_path.exists():
@@ -748,12 +807,16 @@ class Worker:
 
     def _run_git(self, args: list[str]) -> str:
         cmd = ["git"] + args
-        proc = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise WorkerError(f"git {' '.join(args)} timed out after 120s") from e
         if proc.returncode != 0:
             raise WorkerError(f"git {' '.join(args)} failed: {proc.stderr[:500]}")
         return proc.stdout

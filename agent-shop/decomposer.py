@@ -312,12 +312,16 @@ class DecomposerAgent:
             f"Each sub-task has been created as a separate issue with the "
             f"`{self.READY_LABEL}` label."
         )
-        self._gh(["issue", "comment", str(self.issue_number), "--body", comment])
+        # Label swap first — prevents re-pickup if subsequent steps fail
         self._gh([
             "issue", "edit", str(self.issue_number),
             "--remove-label", self.READY_LABEL,
             "--add-label", self.DECOMPOSED_LABEL,
         ])
+        try:
+            self._gh(["issue", "comment", str(self.issue_number), "--body", comment])
+        except RuntimeError as exc:
+            log.warning("Could not post decomposition comment on #%d: %s", self.issue_number, exc)
 
     def _gh(self, args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising on non-zero exit."""

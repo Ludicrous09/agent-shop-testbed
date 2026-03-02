@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,10 +125,11 @@ class ReviewAgent:
         diff = self._get_diff()
         logger.info("Got diff (%d chars)", len(diff))
 
-        files = self._get_changed_files()
+        pr_data = self._fetch_pr_data()
+        files = self._get_changed_files(pr_data)
         logger.info("Changed files: %s", files)
 
-        head_branch = self._get_head_branch()
+        head_branch = self._get_head_branch(pr_data)
         logger.info("PR head branch: %s", head_branch)
 
         self._fetch_remote()
@@ -175,20 +177,21 @@ class ReviewAgent:
             raise ReviewError(f"PR #{self.pr_number} has an empty diff")
         return result
 
-    def _get_changed_files(self) -> list[str]:
-        output = self._run_gh(["pr", "view", str(self.pr_number), "--json", "files"])
-        data = json.loads(output)
-        files = [f["path"] for f in data.get("files", [])]
+    def _fetch_pr_data(self) -> dict:
+        """Fetch all required PR fields in a single gh pr view call."""
+        output = self._run_gh(
+            ["pr", "view", str(self.pr_number), "--json", "files,headRefName"]
+        )
+        return json.loads(output)
+
+    def _get_changed_files(self, pr_data: dict) -> list[str]:
+        files = [f["path"] for f in pr_data.get("files", [])]
         if not files:
             raise ReviewError(f"PR #{self.pr_number} has no changed files")
         return files
 
-    def _get_head_branch(self) -> str:
-        output = self._run_gh(
-            ["pr", "view", str(self.pr_number), "--json", "headRefName"]
-        )
-        data = json.loads(output)
-        return data["headRefName"]
+    def _get_head_branch(self, pr_data: dict) -> str:
+        return pr_data["headRefName"]
 
     def _fetch_remote(self) -> None:
         logger.info("Fetching remote to ensure head branch is available locally")
@@ -375,17 +378,36 @@ class ReviewAgent:
 
     def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh"] + args
-        proc = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
+        delays = [5, 15, 30]
+        for attempt in range(3):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ReviewError(
+                    f"gh {' '.join(args)} timed out after {self.timeout}s"
+                ) from exc
+            if proc.returncode == 0:
+                return proc.stdout
+            if attempt < 2 and (
+                "rate limit" in proc.stderr.lower() or "429" in proc.stderr
+            ):
+                logger.warning(
+                    "gh rate limit hit, retrying in %ds (attempt %d/3)",
+                    delays[attempt],
+                    attempt + 1,
+                )
+                time.sleep(delays[attempt])
+                continue
             raise ReviewError(
                 f"gh {' '.join(args)} failed (code {proc.returncode}): {proc.stderr[:500]}"
             )
-        return proc.stdout
+        raise ReviewError(f"gh {' '.join(args)} failed after retries")
 
     def _parse_remote(self) -> tuple[str, str]:
         proc = subprocess.run(

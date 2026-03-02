@@ -29,6 +29,7 @@ import logging
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,9 +67,9 @@ def _clean_file_entry(entry: str) -> str:
 
     Examples::
 
-        ``reviewer.py``          -> ``reviewer.py``
-        SECURITY_AUDIT.md (new) -> SECURITY_AUDIT.md
-        `foo.py`                 -> foo.py
+        '``reviewer.py``'        -> 'reviewer.py'
+        'SECURITY_AUDIT.md (new)' -> 'SECURITY_AUDIT.md'
+        '`foo.py`'               -> 'foo.py'
     """
     entry = _PARENTHETICAL.sub("", entry).strip()
     entry = entry.strip("`")
@@ -197,19 +198,28 @@ class IssueSource:
         silently dropped.  Results are sorted by priority (lowest = highest).
         """
         issues = self._gh_list_issues()
+        # One batch call to get all recently-merged PR titles, then do O(1)
+        # set-membership checks instead of one gh subprocess per issue.
+        merged_issue_numbers = self._fetch_all_merged_prs()
         # Filter out issues already resolved by merged PRs first, so that
         # all_numbers only contains issues that will actually become tasks.
         # This prevents depends_on from referencing tasks that don't exist.
         accepted: list[dict] = []
         for iss in issues:
             number: int = iss["number"]
-            pr_number = self._find_merged_pr(number)
-            if pr_number is not None:
-                log.info("Skipping issue #%d — already resolved by PR #%d", number, pr_number)
-                try:
-                    self._close_already_resolved(number, pr_number)
-                except RuntimeError as exc:
-                    log.warning("Failed to close already-resolved issue #%d: %s", number, exc)
+            if number in merged_issue_numbers:
+                # Batch lookup flagged this issue; use _find_merged_pr as a
+                # fallback to confirm and retrieve the exact PR number.
+                pr_number = self._find_merged_pr(number)
+                if pr_number is not None:
+                    log.info("Skipping issue #%d — already resolved by PR #%d", number, pr_number)
+                    try:
+                        self._close_already_resolved(number, pr_number)
+                    except RuntimeError as exc:
+                        log.warning("Failed to close already-resolved issue #%d: %s", number, exc)
+                else:
+                    # Batch match was a false positive; keep the issue.
+                    accepted.append(iss)
             else:
                 accepted.append(iss)
         all_numbers: set[int] = {iss["number"] for iss in accepted}
@@ -239,24 +249,37 @@ class IssueSource:
     def _gh(self, args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a ``gh`` subcommand, raising on non-zero exit."""
         cmd = ["gh"] + args
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"gh command timed out after {timeout}s: {' '.join(cmd)}"
-            ) from exc
-        if result.returncode != 0:
+        delays = [5, 15, 30]
+        for attempt in range(3):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"gh command timed out after {timeout}s: {' '.join(cmd)}"
+                ) from exc
+            if result.returncode == 0:
+                return result
+            if attempt < 2 and (
+                "rate limit" in result.stderr.lower() or "429" in result.stderr
+            ):
+                log.warning(
+                    "gh rate limit hit, retrying in %ds (attempt %d/3)",
+                    delays[attempt],
+                    attempt + 1,
+                )
+                time.sleep(delays[attempt])
+                continue
             raise RuntimeError(
                 f"gh command failed ({result.returncode}): "
                 f"{' '.join(cmd)}\n{result.stderr.strip()}"
             )
-        return result
+        raise RuntimeError(f"gh command failed after retries: {' '.join(cmd)}")
 
     def _gh_list_issues(self) -> list[dict]:
         result = self._gh([
@@ -266,6 +289,35 @@ class IssueSource:
             "--json", "number,title,body,labels",
         ])
         return json.loads(result.stdout)
+
+    def _fetch_all_merged_prs(self) -> set[int]:
+        """Fetch recently-merged PRs in one gh call and return referenced issue numbers.
+
+        Scans each PR title for ``issue-N`` patterns using whole-word matching to
+        avoid false positives (e.g. ``issue-10`` is not confused with ``issue-1``).
+        Returns an empty set if the gh call fails so the caller degrades gracefully.
+        """
+        try:
+            result = self._gh([
+                "pr", "list",
+                "--state", "merged",
+                "--limit", "200",
+                "--json", "number,title,state",
+            ])
+        except RuntimeError as exc:
+            log.warning("_fetch_all_merged_prs gh call failed: %s", exc)
+            return set()
+        try:
+            prs = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return set()
+        pattern = re.compile(r"\bissue-(\d+)\b", re.IGNORECASE)
+        referenced: set[int] = set()
+        for pr in prs:
+            if pr.get("state") == "MERGED":
+                for m in pattern.finditer(pr.get("title", "")):
+                    referenced.add(int(m.group(1)))
+        return referenced
 
     def _find_merged_pr(self, number: int) -> int | None:
         """Return the PR number of a merged PR whose title references this issue, or None.

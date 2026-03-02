@@ -339,14 +339,20 @@ class ArchitectAgent:
             stdin_input = None
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-            env=env,
-            input=stdin_input,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                env=env,
+                input=stdin_input,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "claude command timed out after 600s"
+            ) from exc
 
         if result.returncode != 0:
             raise RuntimeError(
@@ -370,13 +376,19 @@ class ArchitectAgent:
         """Run a ``gh`` subcommand, raising ``RuntimeError`` on non-zero exit."""
         cmd = ["gh"] + args
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"gh command timed out after 60s: {' '.join(cmd)}"
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(
                 f"gh command failed ({result.returncode}): "
