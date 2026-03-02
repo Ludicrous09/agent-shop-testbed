@@ -306,27 +306,48 @@ class IssueSource:
         return json.loads(result.stdout)
 
     def _gh_view_issue(self, number: int) -> list[dict]:
-        """Fetch a single issue by number and return it as a one-element list."""
-        result = self._gh([
-            "issue", "view", str(number),
-            "--json", "number,title,body,labels",
-        ])
+        """Fetch a single issue by number and return it as a one-element list.
+
+        Raises a friendlier RuntimeError if the issue does not exist, is
+        closed, or is otherwise inaccessible, rather than surfacing raw gh
+        stderr to the caller.
+        """
+        try:
+            result = self._gh([
+                "issue", "view", str(number),
+                "--json", "number,title,body,labels",
+            ])
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Issue #{number} not found or could not be fetched. "
+                f"Verify the issue number exists and the repository is accessible.\n"
+                f"Details: {exc}"
+            ) from exc
         return [json.loads(result.stdout)]
 
     def _fetch_all_merged_prs(self) -> set[int]:
-        """Fetch recently-merged PRs in one gh call and return referenced issue numbers.
+        """Fetch ALL merged PRs and return referenced issue numbers.
+
+        Uses a high ``--limit`` so the gh CLI paginates through the full PR
+        history rather than stopping at a small fixed boundary.  The previous
+        ``--limit 200`` cap introduced a silent correctness regression: issues
+        resolved by PRs older than the 200-most-recent boundary would never
+        appear in the result, causing already-resolved issues to be re-assigned
+        as agent tasks.
 
         Scans each PR title for ``issue-N`` patterns using whole-word matching to
         avoid false positives (e.g. ``issue-10`` is not confused with ``issue-1``).
+        Only PRs in ``MERGED`` state are counted; the Python-side check guards
+        against unexpected non-merged entries in the response.
         Returns an empty set if the gh call fails so the caller degrades gracefully.
         """
         try:
             result = self._gh([
                 "pr", "list",
                 "--state", "merged",
-                "--limit", "200",
+                "--limit", "100000",
                 "--json", "number,title,state",
-            ])
+            ], timeout=300)
         except RuntimeError as exc:
             log.warning("_fetch_all_merged_prs gh call failed: %s", exc)
             return set()
@@ -337,9 +358,10 @@ class IssueSource:
         pattern = re.compile(r"\bissue-(\d+)\b", re.IGNORECASE)
         referenced: set[int] = set()
         for pr in prs:
-            if pr.get("state") == "MERGED":
-                for m in pattern.finditer(pr.get("title", "")):
-                    referenced.add(int(m.group(1)))
+            if pr.get("state") != "MERGED":
+                continue
+            for m in pattern.finditer(pr.get("title", "")):
+                referenced.add(int(m.group(1)))
         return referenced
 
     def _find_merged_pr(self, number: int) -> int | None:

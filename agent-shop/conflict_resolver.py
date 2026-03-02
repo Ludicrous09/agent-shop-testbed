@@ -444,24 +444,49 @@ class ConflictResolver:
             #    to the pre-merge commit, so reset there to remove the dangling
             #    merge commit and restore the branch to its original state.
             if committed:
-                subprocess.run(
+                reset_proc = subprocess.run(
                     ["git", "reset", "--hard", "ORIG_HEAD"],
                     cwd=self._worktree_path,
                     capture_output=True,
+                    text=True,
                 )
+                if reset_proc.returncode != 0:
+                    logger.warning(
+                        "git reset --hard ORIG_HEAD failed (code %d): %s",
+                        reset_proc.returncode,
+                        reset_proc.stderr[:500],
+                    )
             else:
-                merge_head = self._worktree_path / ".git" / "MERGE_HEAD"
-                if merge_head.exists():
-                    subprocess.run(
+                merge_in_progress = subprocess.run(
+                    ["git", "rev-parse", "MERGE_HEAD"],
+                    cwd=self._worktree_path,
+                    capture_output=True,
+                ).returncode == 0
+                if merge_in_progress:
+                    abort_proc = subprocess.run(
                         ["git", "merge", "--abort"],
                         cwd=self._worktree_path,
                         capture_output=True,
+                        text=True,
                     )
-                subprocess.run(
+                    if abort_proc.returncode != 0:
+                        logger.warning(
+                            "git merge --abort failed (code %d): %s",
+                            abort_proc.returncode,
+                            abort_proc.stderr[:500],
+                        )
+                reset_proc = subprocess.run(
                     ["git", "reset", "--hard", "HEAD"],
                     cwd=self._worktree_path,
                     capture_output=True,
+                    text=True,
                 )
+                if reset_proc.returncode != 0:
+                    logger.warning(
+                        "git reset --hard HEAD failed (code %d): %s",
+                        reset_proc.returncode,
+                        reset_proc.stderr[:500],
+                    )
             raise
 
     def _post_comment(self, resolved_files: list[str]) -> None:
@@ -518,7 +543,7 @@ class ConflictResolver:
 
     def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh"] + args
-        delays = [5, 15, 30]
+        delays = [5, 15]
         for attempt in range(3):
             try:
                 proc = subprocess.run(
@@ -547,7 +572,6 @@ class ConflictResolver:
             raise ConflictError(
                 f"gh {' '.join(args)} failed (code {proc.returncode}): {proc.stderr[:500]}"
             )
-        raise ConflictError(f"gh {' '.join(args)} failed after retries")
 
 
 # ---------------------------------------------------------------------------

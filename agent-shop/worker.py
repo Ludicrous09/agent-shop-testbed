@@ -55,6 +55,7 @@ class WorkerResult:
 
 class Worker:
     WORKTREE_BASE = Path("/tmp/agent-worktrees/")
+    _PUSH_RETRY_DELAYS: tuple[int, ...] = (5, 15, 45)
 
     def __init__(
         self,
@@ -429,6 +430,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if fetch.returncode != 0:
             logger.warning("git fetch origin main failed: %s", fetch.stderr[:300])
@@ -440,6 +442,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
 
         if rebase.returncode == 0:
@@ -460,6 +463,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
 
         merge = subprocess.run(
@@ -467,6 +471,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
 
         if merge.returncode == 0:
@@ -484,6 +489,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         conflicted_files = [
             f for f in conflict_files_result.stdout.strip().splitlines() if f
@@ -503,6 +509,7 @@ class Worker:
                     ["git", "merge", "--abort"],
                     cwd=self.worktree_path,
                     capture_output=True,
+                    timeout=60,
                 )
                 self._log(
                     f"Rebase outcome: conflict resolution failed ({e})"
@@ -516,6 +523,7 @@ class Worker:
                 ["git", "merge", "--abort"],
                 cwd=self.worktree_path,
                 capture_output=True,
+                timeout=60,
             )
             self._log(
                 "Rebase outcome: conflict resolution failed (no conflicted files found)"
@@ -586,6 +594,7 @@ class Worker:
             cwd=self.worktree_path,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         remaining_files = [f for f in remaining.stdout.strip().splitlines() if f]
         if remaining_files:
@@ -599,7 +608,7 @@ class Worker:
 
     def _push(self) -> None:
         logger.info("Pushing branch %s to origin", self.branch)
-        delays = [5, 15, 45]
+        delays = self._PUSH_RETRY_DELAYS
         last_stderr = ""
         for attempt, delay in enumerate(delays, start=1):
             result = subprocess.run(
@@ -622,6 +631,7 @@ class Worker:
                 )
                 time.sleep(delay)
         logger.error("git push failed for task %s: %s", self.task.id, last_stderr)
+        self._log(f"git push stderr: {last_stderr}")
         raise WorkerError(f"git push failed after {len(delays)} attempts — check server logs for details")
 
     def _create_pr(self, result: WorkerResult) -> tuple[str, int]:
@@ -660,7 +670,7 @@ class Worker:
         if label:
             cmd.extend(["--label", label])
 
-        delays = [5, 15, 45]
+        delays = self._PUSH_RETRY_DELAYS
         for attempt, delay in enumerate(delays, start=1):
             proc = subprocess.run(
                 cmd,
@@ -805,7 +815,7 @@ class Worker:
     def _log(self, message: str) -> None:
         self._log_lines.append(f"[{datetime.now(timezone.utc).isoformat()}] {message}")
 
-    def _run_git(self, args: list[str]) -> str:
+    def _run_git(self, args: list[str], timeout: int = 60) -> str:
         cmd = ["git"] + args
         try:
             proc = subprocess.run(
@@ -813,10 +823,10 @@ class Worker:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
-            raise WorkerError(f"git {' '.join(args)} timed out after 120s") from e
+            raise WorkerError(f"git {' '.join(args)} timed out after {timeout}s") from e
         if proc.returncode != 0:
             raise WorkerError(f"git {' '.join(args)} failed: {proc.stderr[:500]}")
         return proc.stdout

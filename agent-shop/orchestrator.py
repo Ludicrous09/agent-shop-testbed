@@ -277,10 +277,13 @@ def _clean_env() -> dict[str, str]:
 
 
 def _summarize_review_comment(comment_text: str, filename: str, line: int) -> tuple[str, str]:
-    """Use Claude CLI to generate a concise title and action summary.
+    """Use Claude CLI to generate a concise title and action summary for a single comment.
 
     Returns (title_suffix, action_summary) where title_suffix is under 60 chars
     and action_summary is 1-2 sentences.  Falls back to truncated text on failure.
+
+    Note: Production code uses _summarize_review_comments_batch for efficiency.
+    This single-comment variant is retained for direct use and unit-test coverage.
     """
     prompt = (
         "You are summarizing a code review comment for a GitHub issue title and body.\n\n"
@@ -363,8 +366,10 @@ def _summarize_review_comments_batch(
             # Strip markdown code fences if present
             if raw.startswith("```"):
                 lines = raw.splitlines()
-                end = -1 if lines[-1].strip() == "```" else len(lines)
-                raw = "\n".join(lines[1:end])
+                if lines[-1].strip() == "```":
+                    raw = "\n".join(lines[1:-1])
+                else:
+                    raw = "\n".join(lines[1:])
             parsed = json.loads(raw)
             if isinstance(parsed, list) and len(parsed) == len(comments):
                 results: list[tuple[str, str]] = []
@@ -613,7 +618,7 @@ def _review_fix_merge_sync(
     try:
         for attempt in range(abs_max_fixes + 1):
             log.info("Reviewing PR #%d (round %d)", pr, attempt + 1)
-            _fire_event(on_event, "review_started", {"task_id": result.task_id, "pr_number": pr})
+            _fire_event(on_event, "review_started", {"task_id": result.task_id, "pr_number": pr, "title": task_title})
             try:
                 reviewer = ReviewAgent(repo_path=repo_path, pr_number=pr)
                 review = reviewer.review()
@@ -637,7 +642,7 @@ def _review_fix_merge_sync(
 
             if review.verdict == "approve":
                 log.info("PR #%d approved — checking mergeability before merge", pr)
-                _fire_event(on_event, "review_approved", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url})
+                _fire_event(on_event, "review_approved", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url, "title": task_title})
                 # Sleep briefly to allow GitHub to compute merge status after the push
                 time.sleep(2)
 
@@ -803,7 +808,7 @@ def _review_fix_merge_sync(
                     return False, error_msg
 
                 log.info("PR #%d merged — pulling latest main", pr)
-                _fire_event(on_event, "merge_completed", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url})
+                _fire_event(on_event, "merge_completed", {"task_id": result.task_id, "pr_number": pr, "pr_url": pr_url, "title": task_title})
                 pull = subprocess.run(
                     ["git", "pull"],
                     cwd=repo_path,
@@ -877,7 +882,7 @@ def _review_fix_merge_sync(
                     error_count,
                 )
             prev_error_count = error_count
-            _fire_event(on_event, "review_fix_needed", {"task_id": result.task_id, "pr_number": pr, "attempt": attempt + 1})
+            _fire_event(on_event, "review_fix_needed", {"task_id": result.task_id, "pr_number": pr, "attempt": attempt + 1, "title": task_title})
 
             log.info(
                 "PR #%d needs changes — running FixAgent (fix %d)",
@@ -922,12 +927,11 @@ def _review_fix_merge_sync(
         )
         return False, error_msg
     except Exception as exc:
-        tb = traceback.format_exc()
-        log.error("Unexpected error in review/fix/merge for PR #%d: %s\n%s", pr, exc, tb)
+        log.error("Unexpected error in review/fix/merge for PR #%d: %s\n%s", pr, exc, traceback.format_exc())
         error_msg = (
             f"**Review step failed** for {pr_url}\n\n"
             f"**Error type:** `{type(exc).__name__}`\n\n"
-            f"See server logs for details."
+            f"See server logs for full details."
         )
         return False, error_msg
 
@@ -1575,6 +1579,7 @@ async def orchestrate(
                 await asyncio.sleep(2)
 
     finally:
+        log.info("Waiting for threads to finish...")
         executor.shutdown(wait=True, cancel_futures=True)
 
     # Final summary

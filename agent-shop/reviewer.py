@@ -102,11 +102,13 @@ class ReviewAgent:
         pr_number: int,
         model: str = "sonnet",
         timeout: int = 300,
+        gh_timeout: int = 60,
     ):
         self.repo_path = Path(repo_path).resolve()
         self.pr_number = pr_number
         self.model = model
         self.timeout = timeout
+        self.gh_timeout = gh_timeout
         self._owner, self._repo = self._parse_remote()
         logger.info(
             "ReviewAgent initialised for PR #%d in %s/%s (model=%s)",
@@ -238,7 +240,8 @@ class ReviewAgent:
         )
 
     def _run_claude(self, prompt: str) -> str:
-        use_stdin = len(prompt.encode("utf-8")) > _LARGE_PROMPT_THRESHOLD
+        prompt_bytes = prompt.encode("utf-8")
+        use_stdin = len(prompt_bytes) > _LARGE_PROMPT_THRESHOLD
         cmd = [
             "claude",
             "--dangerously-skip-permissions",
@@ -251,7 +254,7 @@ class ReviewAgent:
             stdin_input: str | None = prompt
             logger.info(
                 "Prompt size %d bytes exceeds threshold; passing via stdin",
-                len(prompt.encode("utf-8")),
+                len(prompt_bytes),
             )
         else:
             cmd += ["-p", prompt]
@@ -370,12 +373,18 @@ class ReviewAgent:
         verdict_tag = f"[REVIEW: {event}]"
         full_body = f"## 🤖 Agent Review\n\n{verdict_tag}\n\n{full_body}"
 
-        proc = subprocess.run(
-            ["gh", "pr", "comment", str(self.pr_number), "--body", full_body],
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                ["gh", "pr", "comment", str(self.pr_number), "--body", full_body],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=self.gh_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ReviewError(
+                f"gh pr comment timed out after {self.gh_timeout}s"
+            ) from exc
         if proc.returncode != 0:
             raise ReviewError(
                 f"gh pr comment failed (code {proc.returncode}): {proc.stderr[:500]}"
@@ -396,11 +405,11 @@ class ReviewAgent:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout,
+                    timeout=self.gh_timeout,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise ReviewError(
-                    f"gh {' '.join(args)} timed out after {self.timeout}s"
+                    f"gh {' '.join(args)} timed out after {self.gh_timeout}s"
                 ) from exc
             if proc.returncode == 0:
                 return proc.stdout

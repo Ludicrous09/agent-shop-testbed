@@ -64,12 +64,14 @@ class FixAgent:
         pr_number: int,
         model: str = "sonnet",
         timeout: int = 300,
+        gh_timeout: int = 60,
         max_turns: int = 30,
     ):
         self.repo_path = Path(repo_path).resolve()
         self.pr_number = pr_number
         self.model = model
         self.timeout = timeout
+        self.gh_timeout = gh_timeout
         self.max_turns = max_turns
         self._owner, self._repo = self._parse_remote()
         self._worktree_path = WORKTREE_BASE / f"fix-{pr_number}"
@@ -144,12 +146,7 @@ class FixAgent:
         )
         return json.loads(output)
 
-    def _get_review_feedback(self, pr_data: dict | None = None) -> str:
-        if pr_data is None:
-            output = self._run_gh(
-                ["pr", "view", str(self.pr_number), "--json", "comments"]
-            )
-            pr_data = json.loads(output)
+    def _get_review_feedback(self, pr_data: dict) -> str:
         comments = pr_data.get("comments", [])
 
         tag = "[REVIEW: REQUEST_CHANGES]"
@@ -173,6 +170,13 @@ class FixAgent:
                 feedback = body[idx:].strip()
                 if feedback:
                     return feedback
+                # Intentionally short-circuit the entire search: if a trusted
+                # author posts the tag with no feedback body we treat that as
+                # an error rather than continuing to look for another valid
+                # trusted comment later in the list.  This means an earlier
+                # (more-recent, since we iterate in reverse) empty tag will
+                # abort even when a subsequent trusted comment has usable
+                # feedback.
                 raise FixError(
                     f"Found {tag} in PR comment but no feedback text followed it"
                 )
@@ -181,12 +185,7 @@ class FixAgent:
             f"No comment containing '{tag}' found on PR #{self.pr_number}"
         )
 
-    def _get_head_branch(self, pr_data: dict | None = None) -> str:
-        if pr_data is None:
-            output = self._run_gh(
-                ["pr", "view", str(self.pr_number), "--json", "headRefName"]
-            )
-            pr_data = json.loads(output)
+    def _get_head_branch(self, pr_data: dict) -> str:
         return pr_data["headRefName"]
 
     def _fetch_remote(self) -> None:
@@ -373,11 +372,11 @@ class FixAgent:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout,
+                    timeout=self.gh_timeout,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise FixError(
-                    f"gh {' '.join(args)} timed out after {self.timeout}s"
+                    f"gh {' '.join(args)} timed out after {self.gh_timeout}s"
                 ) from exc
             if proc.returncode == 0:
                 return proc.stdout
@@ -419,6 +418,97 @@ class FixAgent:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Unit tests for _run_gh retry logic
+# ---------------------------------------------------------------------------
+# These tests can be run with: pytest fixer.py
+# They cover the three observable exit paths of _run_gh:
+#   1. Non-rate-limit failure → immediate FixError
+#   2. Rate-limit hit → sleep + retry
+#   3. Exhausted retries → FixError "failed after retries"
+
+
+def _make_fix_agent(tmp_path: "Path") -> "FixAgent":
+    """Return a FixAgent with _parse_remote stubbed to avoid git subprocess."""
+    from unittest.mock import patch
+
+    with patch.object(FixAgent, "_parse_remote", return_value=("owner", "repo")):
+        return FixAgent(repo_path=tmp_path, pr_number=1, gh_timeout=30)
+
+
+def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> "object":
+    from unittest.mock import MagicMock
+
+    m = MagicMock()
+    m.returncode = returncode
+    m.stdout = stdout
+    m.stderr = stderr
+    return m
+
+
+def test_run_gh_non_rate_limit_failure_raises_immediately(tmp_path: "Path") -> None:
+    """A non-zero return code without a rate-limit signal raises FixError immediately."""
+    from unittest.mock import patch
+
+    agent = _make_fix_agent(tmp_path)
+
+    with patch("fixer.subprocess.run", return_value=_proc(returncode=1, stderr="permission denied")):
+        with patch("fixer.time.sleep") as mock_sleep:
+            try:
+                agent._run_gh(["pr", "view", "1"])
+                raise AssertionError("Expected FixError was not raised")
+            except FixError as exc:
+                assert "failed (code 1)" in str(exc)
+                assert "permission denied" in str(exc)
+            # sleep must NOT be called for a non-rate-limit failure
+            mock_sleep.assert_not_called()
+
+
+def test_run_gh_rate_limit_retries_and_sleeps(tmp_path: "Path") -> None:
+    """A rate-limit response causes a sleep then a retry; success on retry returns stdout."""
+    from unittest.mock import patch
+
+    agent = _make_fix_agent(tmp_path)
+
+    side_effects = [
+        _proc(returncode=1, stderr="API rate limit exceeded"),
+        _proc(returncode=0, stdout="ok"),
+    ]
+
+    with patch("fixer.subprocess.run", side_effect=side_effects):
+        with patch("fixer.time.sleep") as mock_sleep:
+            result = agent._run_gh(["pr", "view", "1"])
+
+    assert result == "ok"
+    mock_sleep.assert_called_once_with(5)  # delays[0] == 5
+
+
+def test_run_gh_exhausted_retries_raises(tmp_path: "Path") -> None:
+    """Three consecutive rate-limit failures exhaust retries and raise FixError.
+
+    The retry guard uses ``attempt < 2``, so attempts 0 and 1 sleep-and-retry
+    on a rate-limit signal, while attempt 2 falls through to the inner raise
+    (the post-loop raise is unreachable given range(3) and attempt < 2).
+    """
+    from unittest.mock import patch
+
+    agent = _make_fix_agent(tmp_path)
+
+    rate_limit_proc = _proc(returncode=1, stderr="429 Too Many Requests")
+    side_effects = [rate_limit_proc] * 3
+
+    with patch("fixer.subprocess.run", side_effect=side_effects):
+        with patch("fixer.time.sleep") as mock_sleep:
+            try:
+                agent._run_gh(["pr", "view", "1"])
+                raise AssertionError("Expected FixError was not raised")
+            except FixError as exc:
+                assert "failed (code 1)" in str(exc)
+                assert "429 Too Many Requests" in str(exc)
+            # Two sleeps for attempts 0 and 1; attempt 2 falls through to raise
+            assert mock_sleep.call_count == 2
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -444,6 +534,12 @@ if __name__ == "__main__":
         default=300,
         help="Claude timeout in seconds (default: 300)",
     )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=30,
+        help="Max claude turns (default: 30)",
+    )
     args = parser.parse_args()
 
     agent = FixAgent(
@@ -451,6 +547,7 @@ if __name__ == "__main__":
         pr_number=args.pr,
         model=args.model,
         timeout=args.timeout,
+        max_turns=args.max_turns,
     )
 
     result = agent.fix()

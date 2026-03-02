@@ -162,13 +162,18 @@ class ArchitectAgent:
         Falls back to an explanatory string on error.
         """
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("git ls-files timed out after 30s")
+            return "(could not list files)"
         if result.returncode != 0:
             log.warning("git ls-files failed: %s", result.stderr[:200])
             return "(could not list files)"
