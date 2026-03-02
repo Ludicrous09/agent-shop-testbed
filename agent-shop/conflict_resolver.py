@@ -362,7 +362,7 @@ class ConflictResolver:
         if use_stdin:
             stdin_input: str | None = prompt
         else:
-            cmd[1:1] = ["-p", prompt]
+            cmd = [cmd[0], "-p", prompt] + cmd[1:]
             stdin_input = None
 
         logger.info("Running claude for conflict resolution (timeout=%ds)", self.timeout)
@@ -450,6 +450,7 @@ class ConflictResolver:
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired:
+            # posting the comment is non-critical; a timeout is not fatal
             logger.warning(
                 "gh pr comment timed out after %ds on PR #%d",
                 self.timeout,

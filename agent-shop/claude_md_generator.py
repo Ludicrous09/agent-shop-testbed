@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,8 @@ def detect_frameworks(repo_path: Path) -> list[str]:
                 "starlette": "Starlette",
             }
             for key, name in fw_map.items():
-                if key in content:
+                pattern = r"(?i)^" + re.escape(key) + r"[^a-zA-Z0-9_-]"
+                if re.search(pattern, content, re.MULTILINE):
                     frameworks.append(name)
 
     pyproject = repo_path / "pyproject.toml"
@@ -251,7 +253,7 @@ def detect_build_commands(repo_path: Path) -> list[str]:
             if line and not line.startswith("\t") and not line.startswith("#"):
                 if ":" in line:
                     target = line.split(":")[0].strip()
-                    if target and not target.startswith(".") and target.isidentifier():
+                    if target and not target.startswith(".") and re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', target):
                         targets.append(target)
         if targets:
             commands.append(f"make  # targets: {', '.join(targets[:8])}")

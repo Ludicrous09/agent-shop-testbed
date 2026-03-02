@@ -497,9 +497,18 @@ def _create_followup_issues(
 
 MAX_FIX_ATTEMPTS = 2
 
+# When a fix agent is making measurable progress (error count decreasing each round),
+# allow this many extra fix attempts beyond max_fix_attempts before giving up.
+# The buffer rewards convergent behaviour without inflating the baseline limit for tasks
+# that stall immediately.
+EXTRA_FIX_ATTEMPTS_BUFFER = 3
+
 
 def _review_fix_merge_sync(
-    repo_path: Path, result: WorkerResult, max_fix_attempts: int = MAX_FIX_ATTEMPTS
+    repo_path: Path,
+    result: WorkerResult,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
+    extra_attempts_buffer: int = EXTRA_FIX_ATTEMPTS_BUFFER,
 ) -> tuple[bool, str]:
     """Blocking review/fix/merge cycle. Returns (True, '') on success or (False, error_msg) on failure."""
     pr = result.pr_number
@@ -507,8 +516,8 @@ def _review_fix_merge_sync(
     pr_url = result.pr_url or f"PR #{pr}"
 
     # When the agent is making progress (error count decreasing each round), allow up to
-    # 3 extra fix attempts beyond max_fix_attempts before giving up.
-    abs_max_fixes = max_fix_attempts + 3
+    # extra_attempts_buffer fix attempts beyond max_fix_attempts before giving up.
+    abs_max_fixes = max_fix_attempts + extra_attempts_buffer
     prev_error_count: int | None = None
 
     try:
@@ -584,8 +593,9 @@ def _review_fix_merge_sync(
                     retry_mergeable = retry_unknown_proc.stdout.strip()
                     if not retry_mergeable:
                         log.warning(
-                            "PR #%d mergeability retry returned empty response, skipping",
+                            "PR #%d mergeability retry %d/3 returned empty response, skipping",
                             pr,
+                            _retry + 1,
                         )
                         break
                     mergeable = retry_mergeable
@@ -610,7 +620,7 @@ def _review_fix_merge_sync(
                         )
                         # Sleep to allow GitHub to recompute merge status after push
                         time.sleep(2)
-                        mergeable = ""
+                        mergeable = "UNKNOWN"
                         for _post_attempt in range(POST_RESOLVE_MERGEABILITY_MAX_RETRIES):
                             retry_mergeable_proc = subprocess.run(
                                 ["gh", "pr", "view", str(pr), "--json", "mergeable", "--jq", ".mergeable"],
@@ -640,7 +650,7 @@ def _review_fix_merge_sync(
                                     "PR #%d mergeability UNKNOWN after conflict resolution, "
                                     "retrying (attempt %d/%d)...",
                                     pr,
-                                    _post_attempt + 2,
+                                    _post_attempt + 1,
                                     POST_RESOLVE_MERGEABILITY_MAX_RETRIES,
                                 )
                                 time.sleep(POST_RESOLVE_MERGEABILITY_RETRY_INTERVAL)
@@ -808,7 +818,7 @@ def _review_fix_merge_sync(
     except subprocess.TimeoutExpired as exc:
         cmd_str = " ".join(exc.cmd) if isinstance(exc.cmd, list) else str(exc.cmd)
         log.error(
-            "subprocess timed out in review/fix/merge for PR #%d: `%s` (timeout=%ss)",
+            "subprocess timed out in review/fix/merge for PR #%d: `%s` (timeout=%s s)",
             pr,
             cmd_str,
             exc.timeout,
@@ -820,11 +830,11 @@ def _review_fix_merge_sync(
         return False, error_msg
     except Exception as exc:
         tb = traceback.format_exc()
-        log.error("Unexpected error in review/fix/merge for PR #%d: %s", pr, exc)
+        log.error("Unexpected error in review/fix/merge for PR #%d: %s\n%s", pr, exc, tb)
         error_msg = (
-            f"**Unexpected error** in review/fix/merge cycle for {pr_url}\n\n"
-            f"**Error:** {exc}\n\n"
-            f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+            f"**Review step failed** for {pr_url}\n\n"
+            f"**Error type:** `{type(exc).__name__}`\n\n"
+            f"See server logs for details."
         )
         return False, error_msg
 
@@ -1118,7 +1128,7 @@ async def orchestrate(
     status_path = Path("status.json")
     log_dir_path = Path(log_dir)
 
-    if generate_claude_md_flag:
+    if generate_claude_md_flag and not dry_run:
         log.info("--generate-claude-md set: generating CLAUDE.md for %s", repo)
         written = generate_claude_md(repo)
         if written:
@@ -1168,6 +1178,8 @@ async def orchestrate(
             sorted_priorities[0],
             len(priority_groups[sorted_priorities[0]]),
         )
+
+    loop_start = time.monotonic()
 
     with Live(build_table(state), console=console, refresh_per_second=2) as live:
         while True:
@@ -1302,14 +1314,14 @@ async def orchestrate(
                 except Exception as exc:
                     tb = traceback.format_exc()
                     state.failed_ids.add(task_id)
-                    log.error("Task %s review pipeline raised: %s", task_id, exc)
+                    log.error("Task %s review pipeline raised: %s\n%s", task_id, exc, tb)
                     if issue_source and task_id.startswith("issue-"):
                         pr_url = next((r.pr_url for r in state.results if r.task_id == task_id), None)
                         pr_ref = pr_url or f"task {task_id}"
                         error_msg = (
-                            f"**Unexpected error** in review/fix/merge pipeline for {pr_ref}\n\n"
-                            f"**Error:** {exc}\n\n"
-                            f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+                            f"**Review step failed** for {pr_ref}\n\n"
+                            f"**Error type:** `{type(exc).__name__}`\n\n"
+                            f"See server logs for details."
                         )
                         try:
                             issue_source.mark_failed(task_id, error_msg)
@@ -1427,10 +1439,11 @@ async def orchestrate(
     write_status(state, status_path)
 
     if notify:
+        wall_clock_elapsed = time.monotonic() - loop_start
         _send_desktop_notification(
             len(state.completed_ids),
             len(state.failed_ids),
-            total_elapsed,
+            wall_clock_elapsed,
         )
 
 

@@ -59,6 +59,7 @@ def make_state(max_retries: int = 2) -> OrchestratorState:
         tasks=tasks,
         repo_path=Path("/tmp/repo"),
         timeout=600,
+        log_dir=Path("/tmp/logs"),
         max_retries=max_retries,
     )
 
@@ -184,5 +185,6 @@ def test_run_worker_passes_branch_suffix() -> None:
             worker_id="worker-1",
             timeout=state.timeout,
             branch_suffix="-retry-1",
+            log_dir=state.log_dir,
         )
         executor.shutdown(wait=False)

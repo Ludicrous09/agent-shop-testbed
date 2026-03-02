@@ -233,6 +233,12 @@ class Worker:
                 return True
             # changed path is a suffix of the allowlist entry
             # e.g. a="bot/cogs/approval.py", filepath="approval.py"
+            # NOTE: this direction may over-authorise when the allowlist entry
+            # is longer than the changed path.  Any file sharing the same
+            # basename (e.g. a root-level "approval.py") will be authorised by
+            # an entry like "bot/cogs/approval.py".  The enforcement is
+            # intentionally permissive here, but callers should be aware that
+            # the reverse direction is weaker than a strict path check.
             if a.endswith("/" + filepath):
                 return True
         return False

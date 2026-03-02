@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 
 WORKTREE_BASE = Path("/tmp/agent-worktrees")
 
+# Accounts unconditionally trusted regardless of their author association.
+TRUSTED_BOT_ACCOUNTS: frozenset[str] = frozenset()
+
+# GitHub author association values that indicate write-level repo access.
+# Comments from authors with these associations are treated as trusted review feedback.
+TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "COLLABORATOR", "MEMBER"})
+
 FIX_PROMPT_TEMPLATE = """\
 You are an expert software engineer tasked with addressing code review feedback on a pull request.
 
@@ -132,6 +139,19 @@ class FixAgent:
 
         tag = "[REVIEW: REQUEST_CHANGES]"
         for comment in reversed(comments):
+            author = comment.get("author", {}).get("login", "")
+            association = comment.get("authorAssociation", "")
+            trusted = (
+                author in TRUSTED_BOT_ACCOUNTS
+                or association in TRUSTED_AUTHOR_ASSOCIATIONS
+            )
+            if not trusted:
+                logger.debug(
+                    "Skipping comment from untrusted author %r (association=%r)",
+                    author,
+                    association,
+                )
+                continue
             body = comment.get("body", "")
             if tag in body:
                 idx = body.index(tag) + len(tag)

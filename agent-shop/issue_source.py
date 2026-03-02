@@ -57,6 +57,23 @@ _KNOWN_FILE_EXT = re.compile(
     re.IGNORECASE,
 )
 
+# Matches trailing parenthetical annotations like " (new — output)" or " (read-only)"
+_PARENTHETICAL = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _clean_file_entry(entry: str) -> str:
+    """Strip backticks and trailing parenthetical annotations from a raw file entry.
+
+    Examples::
+
+        ``reviewer.py``          -> ``reviewer.py``
+        SECURITY_AUDIT.md (new) -> SECURITY_AUDIT.md
+        `foo.py`                 -> foo.py
+    """
+    entry = _PARENTHETICAL.sub("", entry).strip()
+    entry = entry.strip("`")
+    return entry
+
 
 def _is_file_path(entry: str) -> bool:
     """Return True if *entry* looks like a file path rather than a Python symbol.
@@ -97,7 +114,7 @@ def _parse_files(body: str) -> list[str]:
             continue  # skip blank lines before first item
         m = _FILES_ITEM.match(line)
         if m:
-            lines.append(m.group(1).strip())
+            lines.append(_clean_file_entry(m.group(1).strip()))
             found_item = True
         else:
             break
