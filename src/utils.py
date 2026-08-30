@@ -26,3 +26,14 @@ def divide(a: int, b: int) -> float:
 def power(base: int, exponent: int) -> int:
     """Raise base to the power of exponent."""
     return base**exponent
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    """Clamp value to the inclusive range [low, high]."""
+    if low > high:
+        raise ValueError(f"low ({low}) must not be greater than high ({high})")
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value

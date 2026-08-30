@@ -1,7 +1,7 @@
 """Tests for utility functions."""
 import pytest
 
-from src.utils import add, divide, multiply, power, subtract
+from src.utils import add, clamp, divide, multiply, power, subtract
 
 
 def test_add():
@@ -101,3 +101,28 @@ def test_power_negative_base_odd_exponent():
     assert power(-2, 3) == -8
     assert power(-3, 1) == -3
     assert power(-5, 3) == -125
+
+
+def test_clamp_value_inside_range():
+    assert clamp(5, 0, 10) == 5
+    assert clamp(2.5, 0, 10) == 2.5
+
+
+def test_clamp_value_below_range():
+    assert clamp(-5, 0, 10) == 0
+    assert clamp(-100, -10, 10) == -10
+
+
+def test_clamp_value_above_range():
+    assert clamp(15, 0, 10) == 10
+    assert clamp(100, -10, 10) == 10
+
+
+def test_clamp_value_equal_to_bounds():
+    assert clamp(0, 0, 10) == 0
+    assert clamp(10, 0, 10) == 10
+
+
+def test_clamp_low_greater_than_high_raises():
+    with pytest.raises(ValueError):
+        clamp(5, 10, 0)
