@@ -24,3 +24,15 @@ def truncate(s: str, max_length: int, suffix: str = "...") -> str:
     if max_length <= len(suffix):
         return suffix[:max_length]
     return s[: max_length - len(suffix)] + suffix
+
+
+def parse_config(text: str) -> dict[str, str]:
+    """Parse key=value configuration text into a dict, ignoring '#' comments."""
+    config: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        config[key.strip()] = value.strip()
+    return config

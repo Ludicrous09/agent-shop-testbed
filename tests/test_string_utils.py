@@ -1,5 +1,11 @@
 """Tests for string utility functions."""
-from src.string_utils import is_palindrome, reverse, truncate, word_count
+from src.string_utils import (
+    is_palindrome,
+    parse_config,
+    reverse,
+    truncate,
+    word_count,
+)
 
 
 # Tests for reverse
@@ -126,3 +132,28 @@ def test_truncate_default_suffix():
     result = truncate("a very long string indeed", 10)
     assert result == "a very ..."
     assert len(result) == 10
+
+
+# Tests for parse_config
+def test_parse_config_typical():
+    text = "host=localhost\nport=8080"
+    assert parse_config(text) == {"host": "localhost", "port": "8080"}
+
+
+def test_parse_config_ignores_comments():
+    text = "# a comment\nhost=localhost\n# another comment\nport=8080"
+    assert parse_config(text) == {"host": "localhost", "port": "8080"}
+
+
+def test_parse_config_empty_input():
+    assert parse_config("") == {}
+
+
+def test_parse_config_ignores_blank_lines():
+    text = "host=localhost\n\n\nport=8080"
+    assert parse_config(text) == {"host": "localhost", "port": "8080"}
+
+
+def test_parse_config_strips_whitespace():
+    text = "  host = localhost  \n  port=8080"
+    assert parse_config(text) == {"host": "localhost", "port": "8080"}
