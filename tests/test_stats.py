@@ -146,3 +146,18 @@ def test_moving_average_window_equals_length():
 
 def test_moving_average_window_one():
     assert moving_average([1, 2, 3], 1) == [1.0, 2.0, 3.0]
+
+
+def test_moving_average_zero_window_raises():
+    with pytest.raises(ValueError):
+        moving_average([1, 2, 3], 0)
+
+
+def test_moving_average_negative_window_raises():
+    with pytest.raises(ValueError):
+        moving_average([1, 2, 3], -1)
+
+
+def test_moving_average_window_exceeds_length_raises():
+    with pytest.raises(ValueError):
+        moving_average([1, 2, 3], 4)
