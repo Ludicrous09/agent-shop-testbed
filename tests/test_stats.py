@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from src.stats import mean, median, mode, std_dev
+from src.stats import mean, median, mode, moving_average, std_dev
 
 
 # --- mean ---
@@ -132,3 +132,17 @@ def test_std_dev_negative_numbers():
 def test_std_dev_empty_raises():
     with pytest.raises(ValueError):
         std_dev([])
+
+
+# --- moving_average ---
+
+def test_moving_average_basic():
+    assert moving_average([1, 2, 3, 4], 2) == [1.5, 2.5, 3.5]
+
+
+def test_moving_average_window_equals_length():
+    assert moving_average([1, 2, 3, 4], 4) == [2.5]
+
+
+def test_moving_average_window_one():
+    assert moving_average([1, 2, 3], 1) == [1.0, 2.0, 3.0]
