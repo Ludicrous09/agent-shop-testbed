@@ -1,7 +1,7 @@
 """Tests for utility functions."""
 import pytest
 
-from src.utils import add, clamp, divide, multiply, power, subtract
+from src.utils import add, clamp, divide, multiply, power, read_lines, subtract, write_lines
 
 
 def test_add():
@@ -126,3 +126,23 @@ def test_clamp_value_equal_to_bounds():
 def test_clamp_low_greater_than_high_raises():
     with pytest.raises(ValueError):
         clamp(5, 10, 0)
+
+
+def test_write_lines_then_read_lines_round_trip(tmp_path):
+    path = tmp_path / "round_trip.txt"
+    lines = ["first", "second", "third"]
+    write_lines(str(path), lines)
+    assert read_lines(str(path)) == lines
+
+
+def test_read_lines_empty_file(tmp_path):
+    path = tmp_path / "empty.txt"
+    write_lines(str(path), [])
+    assert read_lines(str(path)) == []
+
+
+def test_read_lines_with_blank_lines_in_middle(tmp_path):
+    path = tmp_path / "blanks.txt"
+    lines = ["first", "", "third"]
+    write_lines(str(path), lines)
+    assert read_lines(str(path)) == lines

@@ -37,3 +37,16 @@ def clamp(value: float, low: float, high: float) -> float:
     if value > high:
         return high
     return value
+
+
+def read_lines(path: str) -> list[str]:
+    """Read a text file and return its lines with trailing newlines stripped."""
+    with open(path) as f:
+        return [line.rstrip("\n") for line in f]
+
+
+def write_lines(path: str, lines: list[str]) -> None:
+    """Write lines to a text file, one per line."""
+    with open(path, "w") as f:
+        for line in lines:
+            f.write(line + "\n")
