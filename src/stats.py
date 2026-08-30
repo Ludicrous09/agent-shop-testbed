@@ -45,3 +45,16 @@ def std_dev(numbers: list[float]) -> float:
     m = mean(numbers)
     variance = sum((x - m) ** 2 for x in numbers) / len(numbers)
     return variance ** 0.5
+
+
+def moving_average(values: list[float], window: int) -> list[float]:
+    """Calculate the simple moving average over a sliding window.
+
+    For a list of length n and a window of size w, returns n - w + 1
+    entries, each the mean of the corresponding w consecutive values.
+    """
+    if window <= 0:
+        raise ValueError("Window size must be positive")
+    if window > len(values):
+        raise ValueError("Window size cannot exceed the length of values")
+    return [mean(values[i:i + window]) for i in range(len(values) - window + 1)]
