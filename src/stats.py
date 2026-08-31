@@ -38,6 +38,22 @@ def mode(numbers: list[float]) -> float:
     return modes[0]
 
 
+def variance(values: list[float], sample: bool = False) -> float:
+    """Calculate the variance of a list of numbers.
+
+    Returns the population variance by default, or the sample variance
+    (Bessel's correction) when sample=True.
+    """
+    if not values:
+        raise ValueError("Cannot calculate variance of an empty list")
+    if sample and len(values) < 2:
+        raise ValueError("Sample variance requires at least 2 values")
+    m = mean(values)
+    total = sum((x - m) ** 2 for x in values)
+    denominator = len(values) - 1 if sample else len(values)
+    return total / denominator
+
+
 def std_dev(numbers: list[float]) -> float:
     """Calculate the population standard deviation of a list of numbers."""
     if not numbers:
