@@ -1,0 +1,9 @@
+# Deliberately non-default commands so the live run proves the worker uses
+# these and not the built-in "pytest -q" / "ruff check ." defaults.
+verify:
+  test: "python -m pytest -q tests/"
+  lint: "ruff check src tests"
+labels:
+  ready: needs-agent
+  health: tech-debt
+auto_merge: false
