@@ -3,7 +3,16 @@ import math
 
 import pytest
 
-from src.stats import mean, median, mode, moving_average, percentile, std_dev, variance
+from src.stats import (
+    geometric_mean,
+    mean,
+    median,
+    mode,
+    moving_average,
+    percentile,
+    std_dev,
+    variance,
+)
 
 
 # --- mean ---
@@ -236,3 +245,32 @@ def test_variance_empty_raises():
 def test_variance_sample_insufficient_values_raises():
     with pytest.raises(ValueError):
         variance([1.0], sample=True)
+
+
+# --- geometric_mean ---
+
+def test_geometric_mean_basic():
+    assert math.isclose(geometric_mean([1, 3, 9, 27]), 5.196, abs_tol=1e-3)
+
+
+def test_geometric_mean_identical_elements():
+    assert geometric_mean([4, 4]) == 4.0
+
+
+def test_geometric_mean_single_element():
+    assert geometric_mean([9.0]) == 9.0
+
+
+def test_geometric_mean_empty_raises():
+    with pytest.raises(ValueError):
+        geometric_mean([])
+
+
+def test_geometric_mean_zero_raises():
+    with pytest.raises(ValueError):
+        geometric_mean([1, 0, 3])
+
+
+def test_geometric_mean_negative_raises():
+    with pytest.raises(ValueError):
+        geometric_mean([1, -2, 3])
