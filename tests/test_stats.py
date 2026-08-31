@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from src.stats import mean, median, mode, moving_average, percentile, std_dev
+from src.stats import mean, median, mode, moving_average, percentile, std_dev, variance
 
 
 # --- mean ---
@@ -208,3 +208,31 @@ def test_percentile_below_range_raises():
 def test_percentile_above_range_raises():
     with pytest.raises(ValueError):
         percentile([1, 2, 3], 101)
+
+
+# --- variance ---
+
+def test_variance_population_basic():
+    assert variance([2, 4, 4, 4, 5, 5, 7, 9]) == 4.0
+
+
+def test_variance_sample_basic():
+    assert math.isclose(variance([2, 4, 4, 4, 5, 5, 7, 9], sample=True), 4.571, abs_tol=1e-3)
+
+
+def test_variance_identical_elements():
+    assert variance([3, 3, 3, 3]) == 0.0
+
+
+def test_variance_single_element():
+    assert variance([10.0]) == 0.0
+
+
+def test_variance_empty_raises():
+    with pytest.raises(ValueError):
+        variance([])
+
+
+def test_variance_sample_insufficient_values_raises():
+    with pytest.raises(ValueError):
+        variance([1.0], sample=True)
