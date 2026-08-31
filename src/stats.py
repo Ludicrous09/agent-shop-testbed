@@ -81,6 +81,18 @@ def percentile(values: list[float], p: float) -> float:
     return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
+def geometric_mean(values: list[float]) -> float:
+    """Calculate the geometric mean of a list of positive numbers."""
+    if not values:
+        raise ValueError("Cannot calculate geometric mean of an empty list")
+    if any(v <= 0 for v in values):
+        raise ValueError("Geometric mean requires all values to be positive")
+    product = 1.0
+    for v in values:
+        product *= v
+    return product ** (1 / len(values))
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
