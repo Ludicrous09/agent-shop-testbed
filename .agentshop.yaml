@@ -1,9 +1,11 @@
-# Deliberately non-default commands so the live run proves the worker uses
-# these and not the built-in "pytest -q" / "ruff check ." defaults.
+# Agent Shop per-repository configuration (agent-shop #308).
+# The verify commands are deliberately more specific than the built-in
+# defaults ("pytest -q" / "ruff check .") so a live run demonstrably picks
+# these up rather than falling back.
 verify:
   test: "python -m pytest -q tests/"
   lint: "ruff check src tests"
 labels:
-  ready: needs-agent
-  health: tech-debt
+  ready: agent-ready
+  health: code-health
 auto_merge: true
