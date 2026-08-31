@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from src.stats import mean, median, mode, moving_average, std_dev
+from src.stats import mean, median, mode, moving_average, percentile, std_dev
 
 
 # --- mean ---
@@ -161,3 +161,50 @@ def test_moving_average_negative_window_raises():
 def test_moving_average_window_exceeds_length_raises():
     with pytest.raises(ValueError):
         moving_average([1, 2, 3], 4)
+
+
+# --- percentile ---
+
+def test_percentile_median():
+    assert percentile([1, 2, 3, 4], 50) == 2.5
+
+
+def test_percentile_zero():
+    assert percentile([1, 2, 3, 4], 0) == 1
+
+
+def test_percentile_hundred():
+    assert percentile([1, 2, 3, 4], 100) == 4
+
+
+def test_percentile_single_element():
+    assert percentile([7], 50) == 7
+
+
+def test_percentile_unsorted_input():
+    assert percentile([4, 1, 3, 2], 50) == 2.5
+
+
+def test_percentile_interpolation():
+    assert math.isclose(percentile([1, 2, 3, 4, 5], 25), 2.0)
+
+
+def test_percentile_does_not_mutate_input():
+    values = [4, 1, 3, 2]
+    percentile(values, 50)
+    assert values == [4, 1, 3, 2]
+
+
+def test_percentile_empty_raises():
+    with pytest.raises(ValueError):
+        percentile([], 50)
+
+
+def test_percentile_below_range_raises():
+    with pytest.raises(ValueError):
+        percentile([1, 2, 3], -1)
+
+
+def test_percentile_above_range_raises():
+    with pytest.raises(ValueError):
+        percentile([1, 2, 3], 101)
