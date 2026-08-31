@@ -47,6 +47,24 @@ def std_dev(numbers: list[float]) -> float:
     return variance ** 0.5
 
 
+def percentile(values: list[float], p: float) -> float:
+    """Calculate the p-th percentile (0-100) of a list of numbers.
+
+    Uses linear interpolation between the closest ranks.
+    """
+    if not values:
+        raise ValueError("Cannot calculate percentile of an empty list")
+    if p < 0 or p > 100:
+        raise ValueError("Percentile must be between 0 and 100")
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    rank = (p / 100) * (n - 1)
+    lower = int(rank)
+    upper = min(lower + 1, n - 1)
+    fraction = rank - lower
+    return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
