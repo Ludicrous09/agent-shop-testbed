@@ -9,6 +9,7 @@ from src.stats import (
     harmonic_mean,
     mean,
     median,
+    median_absolute_deviation,
     mode,
     moving_average,
     percentile,
@@ -329,3 +330,29 @@ def test_coefficient_of_variation_empty_raises():
 def test_coefficient_of_variation_zero_mean_raises():
     with pytest.raises(ValueError):
         coefficient_of_variation([-5, 5])
+
+
+# --- median_absolute_deviation ---
+
+
+def test_median_absolute_deviation_basic():
+    assert median_absolute_deviation([1, 2, 3, 4, 5]) == 1.0
+
+
+def test_median_absolute_deviation_identical_elements():
+    assert median_absolute_deviation([3, 3, 3, 3]) == 0.0
+
+
+def test_median_absolute_deviation_single_element():
+    assert median_absolute_deviation([10.0]) == 0.0
+
+
+def test_median_absolute_deviation_does_not_mutate_input():
+    values = [5, 1, 4, 2, 3]
+    median_absolute_deviation(values)
+    assert values == [5, 1, 4, 2, 3]
+
+
+def test_median_absolute_deviation_empty_raises():
+    with pytest.raises(ValueError):
+        median_absolute_deviation([])
