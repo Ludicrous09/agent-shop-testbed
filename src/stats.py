@@ -102,6 +102,19 @@ def harmonic_mean(values: list[float]) -> float:
     return len(values) / sum(1 / v for v in values)
 
 
+def coefficient_of_variation(values: list[float]) -> float:
+    """Calculate the coefficient of variation of a list of numbers.
+
+    Returns the ratio of the population standard deviation to the mean.
+    """
+    if not values:
+        raise ValueError("Cannot calculate coefficient of variation of an empty list")
+    m = mean(values)
+    if m == 0:
+        raise ValueError("Coefficient of variation is undefined when the mean is zero")
+    return std_dev(values) / m
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
