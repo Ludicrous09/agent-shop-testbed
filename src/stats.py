@@ -115,6 +115,18 @@ def coefficient_of_variation(values: list[float]) -> float:
     return std_dev(values) / m
 
 
+def median_absolute_deviation(values: list[float]) -> float:
+    """Calculate the median absolute deviation of a list of numbers.
+
+    Returns the median of the absolute deviations from the median.
+    """
+    if not values:
+        raise ValueError("Cannot calculate median absolute deviation of an empty list")
+    m = median(values)
+    deviations = [abs(x - m) for x in values]
+    return median(deviations)
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
