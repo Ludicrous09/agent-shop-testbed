@@ -127,6 +127,22 @@ def median_absolute_deviation(values: list[float]) -> float:
     return median(deviations)
 
 
+def trimmed_mean(values: list[float], proportion: float = 0.1) -> float:
+    """Calculate the trimmed mean of a list of numbers.
+
+    Discards the given proportion of values from each end of the sorted
+    list, then returns the mean of the remaining values.
+    """
+    if not values:
+        raise ValueError("Cannot calculate trimmed mean of an empty list")
+    if proportion < 0 or proportion >= 0.5:
+        raise ValueError("Proportion must be in the range [0, 0.5)")
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    trim_count = int(n * proportion)
+    return mean(sorted_values[trim_count:n - trim_count])
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 

@@ -14,6 +14,7 @@ from src.stats import (
     moving_average,
     percentile,
     std_dev,
+    trimmed_mean,
     variance,
 )
 
@@ -356,3 +357,39 @@ def test_median_absolute_deviation_does_not_mutate_input():
 def test_median_absolute_deviation_empty_raises():
     with pytest.raises(ValueError):
         median_absolute_deviation([])
+
+
+# --- trimmed_mean ---
+
+
+def test_trimmed_mean_basic():
+    assert trimmed_mean([1, 2, 3, 4, 100], proportion=0.2) == 3.0
+
+
+def test_trimmed_mean_zero_proportion_is_plain_mean():
+    assert trimmed_mean([1, 2, 3, 4, 100], proportion=0) == 22.0
+
+
+def test_trimmed_mean_default_proportion():
+    assert trimmed_mean([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) == mean([2, 3, 4, 5, 6, 7, 8, 9])
+
+
+def test_trimmed_mean_does_not_mutate_input():
+    values = [5, 1, 4, 2, 3]
+    trimmed_mean(values, proportion=0.2)
+    assert values == [5, 1, 4, 2, 3]
+
+
+def test_trimmed_mean_empty_raises():
+    with pytest.raises(ValueError):
+        trimmed_mean([])
+
+
+def test_trimmed_mean_negative_proportion_raises():
+    with pytest.raises(ValueError):
+        trimmed_mean([1, 2, 3], proportion=-0.1)
+
+
+def test_trimmed_mean_proportion_too_large_raises():
+    with pytest.raises(ValueError):
+        trimmed_mean([1, 2, 3], proportion=0.5)
