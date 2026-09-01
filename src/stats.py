@@ -93,6 +93,15 @@ def geometric_mean(values: list[float]) -> float:
     return product ** (1 / len(values))
 
 
+def harmonic_mean(values: list[float]) -> float:
+    """Calculate the harmonic mean of a list of positive numbers."""
+    if not values:
+        raise ValueError("Cannot calculate harmonic mean of an empty list")
+    if any(v <= 0 for v in values):
+        raise ValueError("Harmonic mean requires all values to be positive")
+    return len(values) / sum(1 / v for v in values)
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
