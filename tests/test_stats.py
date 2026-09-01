@@ -4,6 +4,7 @@ import math
 import pytest
 
 from src.stats import (
+    coefficient_of_variation,
     geometric_mean,
     harmonic_mean,
     mean,
@@ -304,3 +305,27 @@ def test_harmonic_mean_zero_raises():
 def test_harmonic_mean_negative_raises():
     with pytest.raises(ValueError):
         harmonic_mean([1, -2, 3])
+
+
+# --- coefficient_of_variation ---
+
+def test_coefficient_of_variation_basic():
+    assert math.isclose(coefficient_of_variation([2, 4, 4, 4, 5, 5, 7, 9]), 0.4, abs_tol=1e-3)
+
+
+def test_coefficient_of_variation_identical_elements():
+    assert coefficient_of_variation([3, 3, 3, 3]) == 0.0
+
+
+def test_coefficient_of_variation_single_element():
+    assert coefficient_of_variation([10.0]) == 0.0
+
+
+def test_coefficient_of_variation_empty_raises():
+    with pytest.raises(ValueError):
+        coefficient_of_variation([])
+
+
+def test_coefficient_of_variation_zero_mean_raises():
+    with pytest.raises(ValueError):
+        coefficient_of_variation([-5, 5])
