@@ -5,6 +5,7 @@ import pytest
 
 from src.stats import (
     geometric_mean,
+    harmonic_mean,
     mean,
     median,
     mode,
@@ -274,3 +275,32 @@ def test_geometric_mean_zero_raises():
 def test_geometric_mean_negative_raises():
     with pytest.raises(ValueError):
         geometric_mean([1, -2, 3])
+
+
+# --- harmonic_mean ---
+
+def test_harmonic_mean_basic():
+    assert math.isclose(harmonic_mean([1, 2, 4]), 1.714, abs_tol=1e-3)
+
+
+def test_harmonic_mean_identical_elements():
+    assert harmonic_mean([4, 4]) == 4.0
+
+
+def test_harmonic_mean_single_element():
+    assert harmonic_mean([9.0]) == 9.0
+
+
+def test_harmonic_mean_empty_raises():
+    with pytest.raises(ValueError):
+        harmonic_mean([])
+
+
+def test_harmonic_mean_zero_raises():
+    with pytest.raises(ValueError):
+        harmonic_mean([1, 0, 3])
+
+
+def test_harmonic_mean_negative_raises():
+    with pytest.raises(ValueError):
+        harmonic_mean([1, -2, 3])
