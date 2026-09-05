@@ -81,6 +81,16 @@ def percentile(values: list[float], p: float) -> float:
     return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
+def interquartile_range(values: list[float]) -> float:
+    """Calculate the interquartile range (IQR) of a list of numbers.
+
+    Returns the 75th percentile minus the 25th percentile.
+    """
+    if not values:
+        raise ValueError("Cannot calculate interquartile range of an empty list")
+    return percentile(values, 75) - percentile(values, 25)
+
+
 def geometric_mean(values: list[float]) -> float:
     """Calculate the geometric mean of a list of positive numbers."""
     if not values:
