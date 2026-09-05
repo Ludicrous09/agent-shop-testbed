@@ -3,6 +3,7 @@ from src.string_utils import (
     is_palindrome,
     parse_config,
     reverse,
+    slugify,
     truncate,
     word_count,
 )
@@ -157,3 +158,24 @@ def test_parse_config_ignores_blank_lines():
 def test_parse_config_strips_whitespace():
     text = "  host = localhost  \n  port=8080"
     assert parse_config(text) == {"host": "localhost", "port": "8080"}
+
+
+# Tests for slugify
+def test_slugify_basic():
+    assert slugify("Hello, World!") == "hello-world"
+
+
+def test_slugify_multiple_spaces():
+    assert slugify("  Multiple   Spaces ") == "multiple-spaces"
+
+
+def test_slugify_already_a_slug():
+    assert slugify("already-a-slug") == "already-a-slug"
+
+
+def test_slugify_empty():
+    assert slugify("") == ""
+
+
+def test_slugify_collapses_runs_to_single_hyphen():
+    assert slugify("a   b") == "a-b"
