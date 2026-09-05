@@ -23,3 +23,11 @@ def kg_to_lbs(kg: float) -> float:
 
 def lbs_to_kg(lbs: float) -> float:
     return lbs / 2.204623
+
+
+def mps_to_kph(mps: float) -> float:
+    return mps * 3.6
+
+
+def kph_to_mps(kph: float) -> float:
+    return kph / 3.6
