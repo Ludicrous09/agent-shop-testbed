@@ -143,6 +143,16 @@ def trimmed_mean(values: list[float], proportion: float = 0.1) -> float:
     return mean(sorted_values[trim_count:n - trim_count])
 
 
+def interquartile_range(values: list[float]) -> float:
+    """Calculate the interquartile range of a list of numbers.
+
+    Returns the 75th percentile minus the 25th percentile.
+    """
+    if not values:
+        raise ValueError("Cannot calculate interquartile range of an empty list")
+    return percentile(values, 75) - percentile(values, 25)
+
+
 def moving_average(values: list[float], window: int) -> list[float]:
     """Calculate the simple moving average over a sliding window.
 
