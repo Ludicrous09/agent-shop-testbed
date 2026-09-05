@@ -1,5 +1,7 @@
 """String utility functions."""
 
+import re
+
 
 def reverse(s: str) -> str:
     """Reverse a string."""
@@ -36,3 +38,10 @@ def parse_config(text: str) -> dict[str, str]:
         key, _, value = line.partition("=")
         config[key.strip()] = value.strip()
     return config
+
+
+def slugify(s: str) -> str:
+    """Turn a string into a URL-safe slug."""
+    s = re.sub(r"[ _]+", "-", s.lower())
+    s = re.sub(r"[^a-z0-9-]", "", s)
+    return s.strip("-")
