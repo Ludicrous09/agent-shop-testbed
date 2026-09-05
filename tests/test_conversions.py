@@ -6,8 +6,10 @@ from src.conversions import (
     fahrenheit_to_celsius,
     kg_to_lbs,
     km_to_miles,
+    kph_to_mps,
     lbs_to_kg,
     miles_to_km,
+    mps_to_kph,
 )
 
 
@@ -109,3 +111,35 @@ def test_lbs_to_kg_negative():
 
 def test_kg_lbs_roundtrip():
     assert math.isclose(lbs_to_kg(kg_to_lbs(75)), 75.0, rel_tol=1e-9)
+
+
+# --- mps_to_kph ---
+
+def test_mps_to_kph_basic():
+    assert mps_to_kph(1) == 3.6
+
+
+def test_mps_to_kph_zero():
+    assert mps_to_kph(0) == 0.0
+
+
+def test_mps_to_kph_negative():
+    assert math.isclose(mps_to_kph(-10), -36.0, rel_tol=1e-9)
+
+
+# --- kph_to_mps ---
+
+def test_kph_to_mps_basic():
+    assert math.isclose(kph_to_mps(3.6), 1.0, rel_tol=1e-9)
+
+
+def test_kph_to_mps_zero():
+    assert kph_to_mps(0) == 0.0
+
+
+def test_kph_to_mps_negative():
+    assert math.isclose(kph_to_mps(-36), -10.0, rel_tol=1e-9)
+
+
+def test_mps_kph_roundtrip():
+    assert math.isclose(kph_to_mps(mps_to_kph(20)), 20.0, rel_tol=1e-9)
