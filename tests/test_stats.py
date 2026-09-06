@@ -17,6 +17,7 @@ from src.stats import (
     std_dev,
     trimmed_mean,
     variance,
+    z_scores,
 )
 
 
@@ -429,3 +430,25 @@ def test_interquartile_range_does_not_mutate_input():
 def test_interquartile_range_empty_raises():
     with pytest.raises(ValueError):
         interquartile_range([])
+
+
+# --- z_scores ---
+
+
+def test_z_scores_known_values():
+    values = [2, 4, 4, 4, 5, 5, 7, 9]
+    m = mean(values)
+    sd = std_dev(values)
+    expected = [(x - m) / sd for x in values]
+    assert z_scores(values) == expected
+    assert math.isclose(z_scores(values)[0], -1.5)
+
+
+def test_z_scores_empty_raises():
+    with pytest.raises(ValueError):
+        z_scores([])
+
+
+def test_z_scores_identical_values_raises():
+    with pytest.raises(ValueError):
+        z_scores([3, 3, 3, 3])

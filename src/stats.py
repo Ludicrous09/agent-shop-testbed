@@ -164,3 +164,18 @@ def interquartile_range(values: list[float]) -> float:
     if not values:
         raise ValueError("Cannot calculate interquartile range of an empty list")
     return percentile(values, 75) - percentile(values, 25)
+
+
+def z_scores(values: list[float]) -> list[float]:
+    """Calculate the z-score of each value in a list of numbers.
+
+    Each score is the value's distance from the mean, in standard
+    deviations: (x - mean) / std_dev.
+    """
+    if not values:
+        raise ValueError("Cannot calculate z-scores of an empty list")
+    m = mean(values)
+    sd = std_dev(values)
+    if sd == 0:
+        raise ValueError("Cannot calculate z-scores when standard deviation is zero")
+    return [(x - m) / sd for x in values]
