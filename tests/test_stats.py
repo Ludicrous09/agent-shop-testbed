@@ -7,6 +7,7 @@ from src.stats import (
     coefficient_of_variation,
     geometric_mean,
     harmonic_mean,
+    interquartile_range,
     mean,
     median,
     median_absolute_deviation,
@@ -221,6 +222,17 @@ def test_percentile_below_range_raises():
 def test_percentile_above_range_raises():
     with pytest.raises(ValueError):
         percentile([1, 2, 3], 101)
+
+
+# --- interquartile_range ---
+
+def test_interquartile_range_basic():
+    assert interquartile_range([1, 2, 3, 4, 5, 6, 7, 8]) == 3.5
+
+
+def test_interquartile_range_empty_raises():
+    with pytest.raises(ValueError):
+        interquartile_range([])
 
 
 # --- variance ---
