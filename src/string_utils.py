@@ -44,3 +44,21 @@ def slugify(s: str) -> str:
     separated = re.sub(r"[\s_]+", "-", s.lower())
     cleaned = re.sub(r"[^a-z0-9-]", "", separated)
     return re.sub(r"-+", "-", cleaned).strip("-")
+
+
+_TITLE_CASE_LOWERCASE_WORDS = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or",
+    "the", "to",
+}
+
+
+def title_case(s: str) -> str:
+    """Capitalise each word, keeping short joining words lowercase unless first."""
+    words = s.split()
+    result = []
+    for i, word in enumerate(words):
+        if i > 0 and word.lower() in _TITLE_CASE_LOWERCASE_WORDS:
+            result.append(word.lower())
+        else:
+            result.append(word[:1].upper() + word[1:].lower())
+    return " ".join(result)

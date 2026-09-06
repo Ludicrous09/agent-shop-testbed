@@ -4,6 +4,7 @@ from src.string_utils import (
     parse_config,
     reverse,
     slugify,
+    title_case,
     truncate,
     word_count,
 )
@@ -201,3 +202,20 @@ def test_slugify_keeps_digits():
 
 def test_slugify_only_punctuation():
     assert slugify("!!!") == ""
+
+
+# Tests for title_case
+def test_title_case_basic():
+    assert title_case("the quick brown fox") == "The Quick Brown Fox"
+
+
+def test_title_case_joining_words():
+    assert title_case("a tale of two cities") == "A Tale of Two Cities"
+
+
+def test_title_case_all_caps():
+    assert title_case("THE GREAT GATSBY") == "The Great Gatsby"
+
+
+def test_title_case_empty():
+    assert title_case("") == ""
