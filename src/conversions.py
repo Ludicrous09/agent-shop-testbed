@@ -31,3 +31,17 @@ def mps_to_kph(mps: float) -> float:
 
 def kph_to_mps(kph: float) -> float:
     return kph / 3.6
+
+
+def bytes_to_mb(b: float) -> float:
+    """Convert bytes to megabytes using the binary convention (1 MB = 1024 * 1024 bytes),
+    since the decimal convention (1 MB = 1,000,000 bytes) is equally common and the
+    function name alone can't tell you which one is meant."""
+    return b / (1024 * 1024)
+
+
+def mb_to_bytes(mb: float) -> float:
+    """Convert megabytes to bytes using the binary convention (1 MB = 1024 * 1024 bytes),
+    since the decimal convention (1 MB = 1,000,000 bytes) is equally common and the
+    function name alone can't tell you which one is meant."""
+    return mb * 1024 * 1024

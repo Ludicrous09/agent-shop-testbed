@@ -2,12 +2,14 @@
 import math
 
 from src.conversions import (
+    bytes_to_mb,
     celsius_to_fahrenheit,
     fahrenheit_to_celsius,
     kg_to_lbs,
     km_to_miles,
     kph_to_mps,
     lbs_to_kg,
+    mb_to_bytes,
     miles_to_km,
     mps_to_kph,
 )
@@ -147,3 +149,39 @@ def test_mps_kph_roundtrip():
 
 def test_kph_mps_roundtrip():
     assert math.isclose(mps_to_kph(kph_to_mps(120)), 120.0, rel_tol=1e-9)
+
+
+# --- bytes_to_mb ---
+
+def test_bytes_to_mb_basic():
+    assert bytes_to_mb(1048576) == 1.0
+
+
+def test_bytes_to_mb_zero():
+    assert bytes_to_mb(0) == 0.0
+
+
+def test_bytes_to_mb_negative():
+    assert math.isclose(bytes_to_mb(-2097152), -2.0, rel_tol=1e-9)
+
+
+# --- mb_to_bytes ---
+
+def test_mb_to_bytes_basic():
+    assert mb_to_bytes(1) == 1048576
+
+
+def test_mb_to_bytes_zero():
+    assert mb_to_bytes(0) == 0.0
+
+
+def test_mb_to_bytes_negative():
+    assert math.isclose(mb_to_bytes(-2), -2097152, rel_tol=1e-9)
+
+
+def test_bytes_mb_roundtrip():
+    assert math.isclose(mb_to_bytes(bytes_to_mb(5242880)), 5242880, rel_tol=1e-9)
+
+
+def test_mb_bytes_roundtrip():
+    assert math.isclose(bytes_to_mb(mb_to_bytes(10)), 10.0, rel_tol=1e-9)
