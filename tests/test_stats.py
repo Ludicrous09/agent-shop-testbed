@@ -7,6 +7,7 @@ from src.stats import (
     coefficient_of_variation,
     geometric_mean,
     harmonic_mean,
+    interquartile_range,
     mean,
     median,
     median_absolute_deviation,
@@ -393,3 +394,38 @@ def test_trimmed_mean_negative_proportion_raises():
 def test_trimmed_mean_proportion_too_large_raises():
     with pytest.raises(ValueError):
         trimmed_mean([1, 2, 3], proportion=0.5)
+
+
+# --- interquartile_range ---
+
+
+def test_interquartile_range_basic():
+    assert interquartile_range([1, 2, 3, 4, 5]) == 2.0
+
+
+def test_interquartile_range_interpolated():
+    assert math.isclose(interquartile_range([1, 2, 3, 4]), 1.5)
+
+
+def test_interquartile_range_matches_percentiles():
+    values = [7, 2, 9, 4, 1, 8, 3]
+    assert interquartile_range(values) == percentile(values, 75) - percentile(values, 25)
+
+
+def test_interquartile_range_identical_elements():
+    assert interquartile_range([3, 3, 3, 3]) == 0.0
+
+
+def test_interquartile_range_single_element():
+    assert interquartile_range([10.0]) == 0.0
+
+
+def test_interquartile_range_does_not_mutate_input():
+    values = [5, 1, 4, 2, 3]
+    interquartile_range(values)
+    assert values == [5, 1, 4, 2, 3]
+
+
+def test_interquartile_range_empty_raises():
+    with pytest.raises(ValueError):
+        interquartile_range([])
