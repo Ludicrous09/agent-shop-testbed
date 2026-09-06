@@ -3,6 +3,7 @@ from src.string_utils import (
     is_palindrome,
     parse_config,
     reverse,
+    slugify,
     truncate,
     word_count,
 )
@@ -157,3 +158,46 @@ def test_parse_config_ignores_blank_lines():
 def test_parse_config_strips_whitespace():
     text = "  host = localhost  \n  port=8080"
     assert parse_config(text) == {"host": "localhost", "port": "8080"}
+
+
+# Tests for slugify
+def test_slugify_punctuation_removed():
+    assert slugify("Hello, World!") == "hello-world"
+
+
+def test_slugify_collapses_whitespace():
+    assert slugify("  Multiple   Spaces ") == "multiple-spaces"
+
+
+def test_slugify_already_a_slug():
+    assert slugify("already-a-slug") == "already-a-slug"
+
+
+def test_slugify_empty():
+    assert slugify("") == ""
+
+
+def test_slugify_lowercases():
+    assert slugify("ALL CAPS") == "all-caps"
+
+
+def test_slugify_underscores_become_hyphens():
+    assert slugify("snake_case_name") == "snake-case-name"
+
+
+def test_slugify_collapses_mixed_separators():
+    assert slugify("a   b") == "a-b"
+    assert slugify("a _ b") == "a-b"
+
+
+def test_slugify_strips_leading_and_trailing_hyphens():
+    assert slugify("--wrapped--") == "wrapped"
+    assert slugify("!!! shout !!!") == "shout"
+
+
+def test_slugify_keeps_digits():
+    assert slugify("Top 10 Things") == "top-10-things"
+
+
+def test_slugify_only_punctuation():
+    assert slugify("!!!") == ""
