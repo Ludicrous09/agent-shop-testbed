@@ -30,10 +30,11 @@ Each step uses Claude Code in headless mode (`claude -p`) with restricted tool a
 git clone https://github.com/Ludicrous09/agent-shop-testbed.git
 cd agent-shop-testbed
 
-# Create virtual environment
-python -m venv agent-shop/.venv
-source agent-shop/.venv/bin/activate
-pip install pyyaml rich gitpython
+# Install Agent Shop as a package. It is a separate repository — this
+# testbed no longer carries a copy of it.
+python -m venv .venv
+source .venv/bin/activate
+pip install git+https://github.com/Ludicrous09/agent-shop.git
 
 # Create required labels (one-time)
 gh label create agent-ready --color 0E8A16 --description "Ready for agent to work on"
@@ -47,12 +48,12 @@ gh label create priority:3 --color 0075CA --description "Low priority"
 ### Run from GitHub Issues
 ```bash
 # Create an issue with the agent-ready label, then:
-python agent-shop/orchestrator.py --source issues
+agent-shop --source issues --repo-path .
 ```
 
 ### Run from PLAN.yaml
 ```bash
-python agent-shop/orchestrator.py --plan PLAN.yaml
+agent-shop --plan PLAN.yaml --repo-path .
 ```
 
 ### CLI Options
@@ -116,17 +117,25 @@ tasks:
 ```
 
 ## Architecture
+
+This repository is the **target**: a small Python library that Agent Shop works
+on. Agent Shop itself lives in
+[Ludicrous09/agent-shop](https://github.com/Ludicrous09/agent-shop) and is
+installed as a package.
+
 ```
-agent-shop/
-├── orchestrator.py    # Main loop — spawns workers, manages state, rich dashboard
-├── worker.py          # Claude Code headless worker — worktree isolation, PR creation
-├── reviewer.py        # Code review agent — reads diffs, posts verdicts
-├── fixer.py           # Fix agent — addresses review feedback, pushes fixes
-├── task_manager.py    # PLAN.yaml parser and dependency resolver
-├── issue_source.py    # GitHub Issues as task source
-├── logs/              # Per-worker execution logs
-└── status.json        # Live orchestration state
+src/                  # The code agents modify
+tests/                # The suite they must keep green
+PLAN.yaml             # Task source for --source plan
+.agentshop.yaml       # Per-repo config: verify commands, labels, auto_merge
 ```
+
+Until 2026-09-01 a copy of Agent Shop was committed here under `agent-shop/`,
+kept in sync by a `sync.sh` that copied `*.py` between repositories. That copy
+was six months stale by the end, and the tracebacks on
+[agent-shop#111](https://github.com/Ludicrous09/agent-shop/issues/111) came from
+it. It was removed once Agent Shop became pip-installable
+([agent-shop#330](https://github.com/Ludicrous09/agent-shop/issues/330)).
 
 ### Worker Isolation
 

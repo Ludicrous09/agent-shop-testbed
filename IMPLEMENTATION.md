@@ -79,29 +79,29 @@
 agent-run       # Run priority 1-2 issues (safe default)
 agent-run-all   # Run all priorities including P3 cleanup
 agent-dry       # Preview execution plan without running
-agent-sync      # Sync agent-shop code to testbed + commit + push
 ```
 
 ### Manual Run
 
 ```bash
-cd ~/code/personal/agent-shop-testbed
-source agent-shop/.venv/bin/activate
+# Agent Shop installs as a package; there is no copy in this repo any more.
+source .venv/bin/activate
+pip install git+https://github.com/Ludicrous09/agent-shop.git
 
 # Self-improvement (agents modify agent-shop)
-CLAUDECODE= python agent-shop/orchestrator.py \
+CLAUDECODE= agent-shop \
   --source issues \
   --repo-path ~/code/personal/agent-shop \
-  --log-dir agent-shop/logs \
+  --log-dir ./logs \
   --max-workers 2 \
   --max-priority 2 \
   --timeout 600
 
 # Target any repo
-CLAUDECODE= python agent-shop/orchestrator.py \
+CLAUDECODE= agent-shop \
   --source issues \
   --repo-path ~/code/personal/our-caring-circle \
-  --log-dir agent-shop/logs \
+  --log-dir ./logs \
   --max-workers 2
 ```
 
@@ -118,11 +118,15 @@ our-caring-circle/               ← Production app (next target)
 ```
 
 **Workflow:**
-1. Create issues on target repo with `agent-ready` label
-2. `agent-sync` to copy latest code to testbed
+1. Create issues on the target repo with the `agent-ready` label
+2. `pip install --upgrade git+https://github.com/Ludicrous09/agent-shop.git`
+   when you want the latest Agent Shop
 3. `agent-run` to process issues
 4. Review results, merge any failed PRs manually if needed
-5. `agent-sync` again after self-improvement rounds
+
+Steps 2 and 5 used to be `agent-sync`, which copied `*.py` between the two
+repositories. There is nothing to copy now — Agent Shop is a package, and
+installing it is the whole update step (agent-shop#330).
 
 ---
 
@@ -140,7 +144,7 @@ our-caring-circle/               ← Production app (next target)
 | `decomposer.py` | Breaks vague issues into scoped sub-tasks | When `--decompose` flag |
 | `architect.py` | Designs solutions with Opus/CLI before workers execute | When `--architect` flag |
 | `claude_md_generator.py` | Auto-generates CLAUDE.md for target repos | When `--generate-claude-md` flag |
-| `sync.sh` | Copies all .py files to testbed | Manual: `agent-sync` |
+| ~~`sync.sh`~~ | Removed 2026-09-01. Agent Shop is pip-installable, so there is nothing to copy (agent-shop#330). |
 
 ---
 
@@ -197,7 +201,7 @@ our-caring-circle/               ← Production app (next target)
 | #26 | Priority batching | #30 | ✅ |
 | #27 | Architect agent | #35 | ✅ |
 | #28 | Auto-create follow-up issues | #34 | ✅ |
-| #29 | Update sync.sh | — | ✅ (manual) |
+| #29 | Update sync.sh | — | superseded by agent-shop#330 |
 | #36 | Path traversal security fixes | #45 | ✅ |
 | #37 | ARG_MAX temp file fix | #47 | ✅ |
 | #38 | Subprocess timeout/returncode | #52 | ✅ |
