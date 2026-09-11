@@ -9,3 +9,10 @@ labels:
   ready: agent-ready
   health: code-health
 auto_merge: true
+
+# This repo is a sandbox: fast iteration is the point and a mess is cheap
+# (agent-shop #418). Declared rather than inferred — without this line, a repo
+# with no CI is treated as a project that has not set its baselines up yet, and
+# `auto_merge` falls back to `gated` because a PR with no checks passes the CI
+# gate vacuously.
+environment: sandbox
