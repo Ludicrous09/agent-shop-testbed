@@ -1,0 +1,15 @@
+target-version = "py311"
+line-length = 100
+
+extend-exclude = [
+    "src/stats.py",
+    "src/string_utils.py",
+    "tests/test_calculator.py",
+    "tests/test_conversions.py",
+    "tests/test_stats.py",
+    "tests/test_string_utils.py",
+    "tests/test_utils.py",
+]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
