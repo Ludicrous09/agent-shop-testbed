@@ -1,4 +1,5 @@
 """Pydantic request and response models for the string-utility endpoints."""
+
 from pydantic import BaseModel, Field
 
 
@@ -11,18 +12,13 @@ class ReverseResponse(BaseModel):
 
 
 class IsPalindromeRequest(BaseModel):
-    s: str = Field(
-        ..., description="The string to check for palindrome-ness."
-    )
+    s: str = Field(..., description="The string to check for palindrome-ness.")
 
 
 class IsPalindromeResponse(BaseModel):
     result: bool = Field(
         ...,
-        description=(
-            "Whether the string is a palindrome (case-insensitive, "
-            "ignoring spaces)."
-        ),
+        description=("Whether the string is a palindrome (case-insensitive, ignoring spaces)."),
     )
 
 
@@ -36,9 +32,7 @@ class WordCountResponse(BaseModel):
 
 class TruncateRequest(BaseModel):
     s: str = Field(..., description="The string to truncate.")
-    max_length: int = Field(
-        ..., description="The maximum length of the resulting string."
-    )
+    max_length: int = Field(..., description="The maximum length of the resulting string.")
     suffix: str = Field(
         "...",
         description="The suffix appended to the string when it is truncated.",
@@ -52,9 +46,7 @@ class TruncateResponse(BaseModel):
 class ParseConfigRequest(BaseModel):
     text: str = Field(
         ...,
-        description=(
-            "Key=value configuration text to parse, ignoring '#' comments."
-        ),
+        description=("Key=value configuration text to parse, ignoring '#' comments."),
     )
 
 
@@ -69,9 +61,7 @@ class SlugifyRequest(BaseModel):
 
 
 class SlugifyResponse(BaseModel):
-    result: str = Field(
-        ..., description="The lowercase, URL-safe slug generated from the string."
-    )
+    result: str = Field(..., description="The lowercase, URL-safe slug generated from the string.")
 
 
 class TitleCaseRequest(BaseModel):
