@@ -1,10 +1,17 @@
 # Agent Shop per-repository configuration (agent-shop #308).
-# The verify commands are deliberately more specific than the built-in
-# defaults ("pytest -q" / "ruff check .") so a live run demonstrably picks
-# these up rather than falling back.
+#
+# These must match what .github/workflows enforces, or a worker can pass verify
+# and still be blocked by CI — which is exactly what happened to PR #84 on
+# 2026-09-13: `ruff format --check` failed a PR that no configured command
+# covered (agent-shop #481). CI runs `ruff check .`, `ruff format --check .`
+# and `pytest`, so these mirror it.
+#
+# `lint` goes through `bash -c` because agent-shop runs verify commands with
+# `shlex.split` and no shell (verify.py), so an `&&` would be handed to ruff as
+# a literal argument. CI's gate is two commands; the config field is one.
 verify:
-  test: "python -m pytest -q tests/"
-  lint: "ruff check src tests"
+  test: "pytest -q"
+  lint: "bash -c 'ruff check . && ruff format --check .'"
 labels:
   ready: agent-ready
   health: code-health
