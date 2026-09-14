@@ -14,7 +14,19 @@ dependencies = [
 strutil = "src.cli.main:app"
 
 [tool.setuptools]
-packages = ["src", "src.api", "src.api.routes", "strutil"]
+# Every subpackage is listed under BOTH names. A non-editable `pip install .`
+# ships exactly the packages named here -- it does not follow `package-dir`
+# for children the way an editable install's finder does -- so omitting the
+# `strutil.*` mirrors leaves `import strutil.api` broken under the very
+# install path the decision record calls the production one. Caught by review
+# on PR #99; confirmed by `pip install .` into a clean venv.
+#
+# Adding a subpackage under src/ means adding it twice here. That is the cost
+# of the dual namespace, and it is a real one.
+packages = [
+    "src", "src.api", "src.api.routes",
+    "strutil", "strutil.api", "strutil.api.routes",
+]
 
 [tool.setuptools.package-dir]
 strutil = "src"
