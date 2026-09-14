@@ -18,9 +18,7 @@ def test_is_palindrome(client):
     response = client.post("/strings/is-palindrome", json={"s": "A man a plan a canal Panama"})
 
     assert response.status_code == 200
-    assert response.json() == {
-        "result": string_utils.is_palindrome("A man a plan a canal Panama")
-    }
+    assert response.json() == {"result": string_utils.is_palindrome("A man a plan a canal Panama")}
 
 
 def test_is_palindrome_missing_field_returns_422(client):
@@ -48,9 +46,7 @@ def test_truncate(client):
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "result": string_utils.truncate("hello world", 8, "...")
-    }
+    assert response.json() == {"result": string_utils.truncate("hello world", 8, "...")}
 
 
 def test_truncate_missing_field_returns_422(client):
