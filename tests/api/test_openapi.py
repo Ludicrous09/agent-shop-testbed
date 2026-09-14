@@ -52,6 +52,9 @@ def test_every_strings_post_route_has_named_request_and_response_schemas(client)
         request_schema_name = _schema_ref(request_schema)
         assert request_schema_name in component_schemas
 
+        assert "200" in post["responses"], (
+            f"{path} has no 200 response documented in the OpenAPI document"
+        )
         response_schema = post["responses"]["200"]["content"]["application/json"]["schema"]
         response_schema_name = _schema_ref(response_schema)
         assert response_schema_name in component_schemas
