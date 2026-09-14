@@ -20,11 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from src.api.routes.strings import router as strings_router
-
 app = FastAPI(title="String Utils API", version="0.1.0")
-
-app.include_router(strings_router)
 
 
 @app.exception_handler(RequestValidationError)
