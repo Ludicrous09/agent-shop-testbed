@@ -4,83 +4,108 @@ approved: true
 
 # Decision record
 
-> **Not approved.** Nothing downstream runs until a human changes
-> `approved` to `true` above. That is an explicit act on purpose: a
-> record nobody read is not a record anybody agreed to.
+> **Approved 2026-09-13**, after two amendments recorded inline below: the
+> `src/strutil/` restructure was cut down to a new sibling package, and the
+> `pyproject.toml` reversal of the previous record's explicit rejection was
+> written down rather than left implicit.
 
 ## Direction
 
-a small REST API exposing the existing string utilities, so other tools can call them over HTTP
+a command-line interface for the string utilities, with subcommands, a config file for defaults, and machine-readable output for scripting
 
 ## Decisions
 
 ### language and framework
 
-**Python 3.11+ with FastAPI served by uvicorn, with Pydantic models for request and response bodies. Dependencies stay in the existing requirements.txt; no build-system migration.**
+**Python 3.11+, with the CLI built on Typer (Click-based) as a `strutil` command exposing one subcommand per public string utility. The CLI imports the existing string-utilities core directly and adds no new runtime dependency beyond Typer.**
 
-The utilities are already Python, so an in-process HTTP wrapper avoids any cross-language boundary, and FastAPI's generated OpenAPI schema is what makes the endpoints discoverable to the "other tools" that are the whole point of the direction.
+The repository is already Python with a FastAPI/Pydantic HTTP layer over the same core, so the CLI must be a sibling adapter in the same language rather than a separate program. Typer gives subcommands, typed options, generated `--help`, and correct exit-code plumbing without hand-rolled parsing, and its Click foundation is the most widely understood CLI idiom in Python.
 
 Rejected:
-- **Flask** — No built-in request validation or OpenAPI output; we would hand-roll both, and callers would have no machine-readable contract.
-- **Django REST Framework** — Brings an ORM, settings module, and app layout for a service that has no models and no database.
-- **Standard-library http.server** — Zero dependency cost, but routing, JSON error shapes, and validation all become bespoke code we then have to test.
-- **gRPC service** — The direction says HTTP so other tools can call it; gRPC forces every caller to build stubs.
-- **Rewriting the utilities in Go or Node for a faster server** — Discards working, tested Python and doubles the number of implementations to keep correct.
-- **Migrating to pyproject.toml/Poetry as part of this work** — The repo uses requirements.txt today; changing packaging is unrelated churn that would collide with every other agent's branch.
+- **stdlib `argparse`** — Zero new dependencies is a weak argument in a repo that already ships FastAPI and Pydantic. Subparser wiring, typed coercion, and per-subcommand help would all be hand-written and would drift as utilities are added.
+- **Click used directly** — Typer is Click underneath, so this buys the same engine while giving up type-hint-driven signatures that keep subcommands in step with the core function signatures.
+- **A separate CLI in Go or Rust for a fast single binary** — Would fork the string-utility logic into a second implementation, guaranteeing divergence from the API. Startup time is not a constraint for this tool.
+- **Exposing the CLI as a `python src/cli.py` script with manual `sys.argv` handling** — No subcommand structure, no help text, and no installable entry point — it fails the stated direction immediately.
 
 ### deployment
 
-**A single stateless uvicorn process, containerized with a Dockerfile (python:3.11-slim, non-root user, CMD uvicorn src.api.app:app --host 0.0.0.0 --port 8000). Local development runs the identical command without Docker. No reverse proxy, no process manager, no orchestration manifests.**
+**Ship as an installable package: add `pyproject.toml` declaring a `strutil` console-script entry point, installed with `pip install -e .` for development and `pip install .`/pipx for use. `python -m strutil` is supported as an exactly equivalent invocation. `requirements.txt` remains the pinned set CI installs. Nothing is published to PyPI and no image is built.**
 
-The service holds no state and does pure CPU-light string work, so one horizontally-replaceable process is the entire operational story. A container makes that one artifact runnable anywhere without documenting a Python setup.
+A console-script entry point is what makes subcommands and config-file discovery behave like a real tool rather than a script run from the repo root. Keeping `requirements.txt` as CI's input avoids disturbing the workflow that already gates this repository.
 
 Rejected:
-- **Serverless functions (AWS Lambda, Cloud Run functions)** — Per-function packaging and a vendor-specific handler signature for an API whose value is being trivially runnable by any caller, including on a laptop.
-- **Kubernetes manifests or Helm chart** — Orchestration config would outweigh the service it orchestrates; one container needs no scheduler.
-- **gunicorn with uvicorn workers behind nginx** — Multi-worker plus a proxy is a scaling answer to a load problem we do not have, and it adds two more components to configure and debug.
-- **Heroku/Railway/Fly.io PaaS config** — Ties the repo to one vendor's build system; a plain container leaves that choice to whoever deploys.
-- **systemd unit on a long-lived VM** — Pins the service to a hand-maintained host and makes the Python environment part of the deployment surface.
+- **Leave the repo unpackaged and document `python src/cli/main.py ...`** — Breaks when run from any directory other than the repo root, makes `sys.path` the user's problem, and gives scripts no stable command name to call.
+- **Distribute a Docker image as the primary interface** — A container boundary defeats the point of a scripting tool: piping stdin/stdout, reading a config file from the working directory, and relative paths all become friction.
+- **Freeze a single binary with PyInstaller or Nuitka** — Adds a build toolchain and a platform matrix to solve a distribution problem this project does not yet have.
+- **Publish to PyPI as part of this work** — Claims a public name and creates a release obligation before the command surface has stabilized.
+- **Serve the CLI by shelling out to the running FastAPI server** — Makes a local string transformation require a live HTTP service; see the module-boundaries decision.
+
+### packaging, and a rejection this record reverses
+
+**This record adds `pyproject.toml` with a `strutil` console-script entry
+point. The previous decision record explicitly rejected exactly that**, on the
+grounds that "changing packaging is unrelated churn that would collide with
+every other agent's branch".
+
+The reversal is deliberate and narrow. That rejection was right for the API
+milestone, where packaging bought nothing: the service ran via `uvicorn
+src.api.app:app` and needed no entry point. A CLI whose whole deliverable is an
+installed `strutil` command cannot be delivered without one. The collision risk
+the old record named is real and is why `pyproject.toml` must be created by a
+single issue that nothing else runs alongside.
+
+Recorded here rather than left to git history, because `intake --force`
+overwrote the file that held the original rejection, and a decision that
+supersedes another has to say so.
 
 ### storage
 
-**None. The service is stateless: every endpoint is a pure function of its request body, nothing is persisted between requests, and no database, cache, queue, or on-disk file is added.**
+**The CLI is stateless — it persists nothing and caches nothing. The only file it reads is a TOML config supplying flag defaults, parsed with stdlib `tomllib`, discovered as `./strutil.toml` first, then `$XDG_CONFIG_HOME/strutil/config.toml` (falling back to `~/.config/strutil/config.toml`). Resolution order is: explicit command-line flag > `STRUTIL_*` environment variable > config file > built-in default. A missing config file is not an error; a malformed one is a usage error.**
 
-String utilities have no state to keep, so any store would be infrastructure that can fail, drift, or need migration in exchange for nothing. Statelessness is also what makes the deployment decision above hold.
+String utilities are pure functions, so the only state worth keeping is the user's preferred defaults. TOML is parseable by the standard library on the chosen Python version, which keeps the config format from adding a dependency.
 
 Rejected:
-- **SQLite file for request history** — Turns a replaceable process into one with a disk volume and backup story, to store data no requirement asks for.
-- **Redis response cache** — These operations are microseconds of CPU; a network round-trip to a cache would usually be slower than recomputing, and it adds a service that can be down.
-- **Postgres for API keys / usage metering** — Presumes an auth and billing model nobody specified; add it when a real requirement arrives.
-- **Writing a request/response log file inside the container** — Invisible, unrotated, and lost on restart. Logs go to stdout where the container runtime can collect them.
+- **YAML config** — Requires PyYAML purely for a defaults file, and brings type-coercion surprises that TOML does not have.
+- **JSON config** — No comments, and no way for a user to annotate why a default is set — poor ergonomics for a hand-edited file.
+- **INI via `configparser`** — Everything is a string, so booleans and numbers need per-key coercion, and nested sections are awkward.
+- **A SQLite database or an on-disk result cache** — There is no state to store and no computation expensive enough to cache; it would add invalidation bugs for no gain.
+- **Home-directory config only (no project-local file)** — Prevents a repository from checking in its own defaults, which is the case that matters most for scripting.
+- **Environment variables as the only configuration mechanism** — The direction explicitly calls for a config file, and env-only defaults are invisible and hard to review.
 
 ### module boundaries
 
-**src/string_utils.py (and its sibling utility modules) remain pure, HTTP-unaware functions and are not edited to serve the API. A new src/api/ package holds app.py (FastAPI app and error handlers), routes/strings.py (one endpoint per public utility function), and schemas.py (Pydantic request/response models). Import direction is one-way: src/api/ imports src/string_utils.py, never the reverse. Endpoints are explicit routes such as POST /strings/title-case, each with a named schema; behaviour changes belong in the utility module, and route modules contain no string logic.**
+**The existing layout stays put. `src/string_utils.py` is not moved and `src/api/` is not moved; a new `src/cli/` is added alongside them, holding Typer commands, config loading, and output rendering. `src/cli/` and `src/api/` each import `src/string_utils.py` directly and never each other. The CLI must not make HTTP calls and must not import Pydantic request/response models. Output rendering lives in a single `cli/render.py`: human-readable text by default, and under `--format json` a single JSON object on stdout with stable keys (`command`, `ok`, `result`, `error`), with all diagnostics and prompts on stderr. Exit codes: 0 success, 1 expected operational failure, 2 usage or config error.**
 
-The utilities already have callers and tests that must keep working, so the HTTP layer is additive and the dependency arrow points only one way. Explicit per-function routes are what produce a useful OpenAPI document and let each operation have its own validated input shape.
+The API already proved the core is reusable behind an adapter; the CLI is the second adapter, and keeping both thin preserves one implementation of every utility.
+
+**Amended before approval.** The proposal was to restructure everything into
+`src/strutil/{core,cli,api}/`. Rejected: that moves every existing file, so it
+collides with any concurrent branch and rewrites the API work delivered in the
+previous milestone, for no benefit the CLI actually needs. A new sibling
+package gets the same layering with a diff nobody else touches. Confining formatting to one module is what makes the machine-readable contract auditable rather than scattered across subcommands.
 
 Rejected:
-- **Adding route decorators directly to functions in src/string_utils.py** — Makes FastAPI a hard dependency of code that is imported by non-HTTP callers and tests, and couples every future signature change to the wire format.
-- **A single generic POST /call endpoint dispatching by function name via getattr** — Produces an empty OpenAPI contract, gives every operation the same untyped payload, and exposes whatever else lives in the module namespace.
-- **One flat api.py containing app, routes, and models** — Fine at three endpoints, unreadable at fifteen, and it invites business logic to settle in the route handler.
-- **A service/ layer between routes and utilities** — The utility functions already are the service layer; a pass-through indirection adds a file to edit for every change and hides nothing.
-- **Exposing stats.py and conversions.py in the same first pass** — The direction names the string utilities; widening scope now means the boundary gets set by three modules' worth of guesses instead of one working example.
+- **CLI implemented as a client of the local HTTP API** — Requires a running server for offline string work, adds network failure modes to a pure function call, and makes the CLI's behavior depend on deployment state.
+- **Reusing the API's Pydantic response models as the CLI's JSON output contract** — Couples two independently versioned wire formats — an HTTP response shape change would silently break every script parsing CLI output.
+- **Putting Typer decorators directly on the core string functions** — Drags CLI concerns into the layer the API also consumes and makes the core untestable without invoking a command runner.
+- **A shared `services/` layer between core and both adapters** — There is no orchestration for it to hold; it would become a pass-through that duplicates core signatures.
+- **Per-subcommand ad-hoc printing with `print()`** — Guarantees drift in the JSON shape between subcommands and makes the stdout/stderr split impossible to enforce.
 
 ### quality gates
 
-**Ruff for lint and formatting (replacing any ad-hoc style), pytest for tests, and a GitHub Actions workflow at .github/workflows/ci.yml running ruff check, ruff format --check, and pytest on every push and pull request, with a failing job blocking merge. API endpoints are tested through fastapi.testclient.TestClient in tests/api/, and existing tests/ for the utility modules keep passing unchanged. A pull request must not reduce the set of passing tests.**
+**Extend the existing `verify` script and `ci.yml` rather than adding a new workflow. Gates: (1) pytest exercises every subcommand through Typer's `CliRunner`, asserting stdout, stderr, and exit code; (2) for every subcommand, `--format json` output is parsed and validated against the documented key set, and stdout is asserted to contain nothing but that JSON; (3) a parity test asserts every public string utility has both an API route and a CLI subcommand — the CLI counterpart of the OpenAPI coverage assertion already in place; (4) the existing lint/format checks extend to the new package. CI is green only when `verify` passes end to end.**
 
-The repo has no CI today, so the cheapest real gain is making the existing pytest suite actually run on every change rather than adding more tools. Ruff covers lint and format in one fast dependency, and TestClient exercises routing, validation, and serialization without binding a port.
+This repository already settled on `verify` as the single source of truth that CI mirrors, so the CLI's gates belong inside it. The parity test is the gate that actually matters over time: it is what stops a new utility from reaching one adapter and not the other.
 
 Rejected:
-- **black + flake8 + isort** — Three tools, three configs, and three chances to disagree, for what ruff does in one pass.
-- **mypy --strict across the repo** — Would force a typing retrofit of existing untyped utility modules before a single endpoint ships; Pydantic already validates everything crossing the HTTP boundary.
-- **A coverage percentage threshold (e.g. fail under 90%)** — On a codebase this small the number is trivially gamed by testing easy paths, and it turns into a merge obstacle unrelated to whether the API is correct.
-- **pre-commit hooks as the only gate** — Locally skippable and silently absent for any agent or contributor who never installs them; CI is the check that actually holds.
-- **Contract tests against a running container in CI** — Needs a build and a health-wait for coverage that TestClient already gives in-process, in a fraction of the time.
+- **Manual testing plus documentation of the commands** — Exit codes and the exact stdout byte stream are the CLI's public contract; nothing but an assertion keeps them stable.
+- **Snapshot-testing the human-readable help and output text as the primary gate** — Brittle against wording and terminal-width changes, and it would make cosmetic edits look like regressions while missing JSON contract breaks.
+- **A separate GitHub Actions workflow for CLI tests** — Splits the enforced gate in two and re-opens the drift between local `verify` and CI that the existing chore commit closed.
+- **A mandated 100% line-coverage threshold** — Pushes effort toward argument-plumbing coverage instead of the contract assertions that catch real breakage.
+- **Introducing a new type-checker or linter stack alongside what CI already enforces** — Changes the quality bar for the whole repository under cover of a CLI feature; the new package meets the existing bar instead.
 
 ## Milestone
 
-**String utilities reachable over HTTP**
+**`strutil` command installed, with every string utility as a subcommand, TOML defaults, and JSON output**
 
-DONE WHEN Starting the app with `uvicorn src.api.app:app` and issuing an HTTP request to each public function in src/string_utils.py returns that function's result as JSON with status 200 — matching what calling the function directly in Python returns for the same input; a request with a missing or wrong-typed field returns 422 with a body naming the offending field; an unknown path returns 404 as JSON rather than an HTML page or a stack trace; GET /openapi.json lists every one of those endpoints with a named request and response schema; and `ruff check`, `ruff format --check`, and `pytest` all exit 0 in GitHub Actions on the pull request, with the pre-existing tests/ suite still passing and src/string_utils.py unmodified.
+DONE WHEN After `pip install -e .` from a clean checkout: `strutil --help` and `python -m strutil --help` both list one subcommand per public string utility, and the parity test confirms that list matches the routes in the generated OpenAPI document with no gaps in either direction. Each subcommand run with `--format json` writes exactly one JSON object to stdout containing `command`, `ok`, and `result`, with stdout parseable by `json.loads` with no other bytes present, and all diagnostics on stderr. A `strutil.toml` in the working directory that sets a default for a flag changes the result when that flag is omitted, and that value is overridden when the flag is passed explicitly. A successful run exits 0; an unknown subcommand, a bad flag value, or a malformed config file exits 2 with the message on stderr and nothing on stdout. `verify` passes locally and the same run is green in `ci.yml`.
