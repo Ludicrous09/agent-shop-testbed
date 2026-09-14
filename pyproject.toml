@@ -7,23 +7,20 @@ name = "strutil"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "typer",
+    "typer>=0.12.0",
 ]
 
 [project.scripts]
 strutil = "src.cli.main:app"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-# `strutil = "src.cli.main:app"` above resolves once src/cli exists, because
-# find() with include=["src*"] discovers "src.cli" as a nested package the
-# same way it already discovers "src.api". A package-dir alias would NOT get
-# `strutil` a top-level `import strutil` / `python -m strutil`: find() invents
-# names by scanning directories, it never consults package-dir, so a name
-# with no matching directory (there is no top-level strutil/ here) is never
-# produced regardless of aliasing. Making `import strutil` / `python -m
-# strutil` work requires the issue that creates src/cli to also add an
-# explicit "strutil" entry (with a matching package-dir mapping) to this
-# file, since setuptools refuses to build with an explicit package directory
-# that doesn't exist yet.
+[tool.setuptools]
+packages = ["src", "src.api", "src.api.routes", "strutil"]
+
+[tool.setuptools.package-dir]
+strutil = "src"
+# `strutil` is aliased to the `src` directory (not discovered via find(),
+# which never consults package-dir) so the same files resolve under both the
+# existing `src.*` names and the top-level `strutil` name. Editable installs
+# redirect imports by directory, so nested modules added under `src/` later
+# (e.g. `src/cli`) resolve automatically as both `src.cli` and `strutil.cli`
+# without further edits here.
