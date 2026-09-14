@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strutil"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "typer",
+]
+
+[project.scripts]
+strutil = "src.cli.main:app"
+
+[tool.setuptools]
+# "strutil" is aliased onto src/cli so `python -m strutil` works once that
+# package exists; it isn't in packages.find yet because setuptools refuses to
+# build if a listed package directory is missing, and src/cli doesn't exist
+# until the next issue creates it.
+package-dir = {"strutil" = "src/cli"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
