@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strutil"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+strutil = "src.cli.main:app"
+
+[tool.setuptools]
+# Every subpackage is listed under BOTH names. A non-editable `pip install .`
+# ships exactly the packages named here -- it does not follow `package-dir`
+# for children the way an editable install's finder does -- so omitting the
+# `strutil.*` mirrors leaves `import strutil.api` broken under the very
+# install path the decision record calls the production one. Caught by review
+# on PR #99; confirmed by `pip install .` into a clean venv.
+#
+# Adding a subpackage under src/ means adding it twice here. That is the cost
+# of the dual namespace, and it is a real one.
+packages = [
+    "src", "src.api", "src.api.routes",
+    "strutil", "strutil.api", "strutil.api.routes",
+]
+
+[tool.setuptools.package-dir]
+strutil = "src"
+# `strutil` is aliased to the `src` directory (not discovered via find(),
+# which never consults package-dir) so the same files resolve under both the
+# existing `src.*` names and the top-level `strutil` name. Editable installs
+# redirect imports by directory, so nested modules added under `src/` later
+# (e.g. `src/cli`) resolve automatically as both `src.cli` and `strutil.cli`
+# without further edits here.
