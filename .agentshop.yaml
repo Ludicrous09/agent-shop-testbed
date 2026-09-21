@@ -10,8 +10,25 @@
 # `shlex.split` and no shell (verify.py), so an `&&` would be handed to ruff as
 # a literal argument. CI's gate is two commands; the config field is one.
 verify:
-  test: "pytest -q"
-  lint: "bash -c 'ruff check . && ruff format --check .'"
+  # Pinned to this repo's venv rather than whatever `pytest` and `ruff` resolve
+  # to on PATH. `git rev-parse --git-common-dir` finds the MAIN checkout's .git
+  # even from inside a worktree, so `/../.venv` is this repo's venv wherever
+  # verify runs; the working directory stays the worktree, so the tests and the
+  # lint still target the branch under review.
+  #
+  # A plain relative `.venv/bin/pytest` cannot work here: workers verify inside
+  # a fresh git worktree and `.venv` is gitignored, so it is not there.
+  #
+  # Why this matters: PR #103 was verified as a FAILING suite (0.4s, a
+  # collection error) because the PATH `pytest` had no `typer`, which this repo
+  # declares in requirements.txt. The run summary said "Red suite: 1" about code
+  # that CI proved green. Verify that reports working code as broken trains an
+  # operator to ignore it.
+  #
+  # `bash -c` because verify runs through `shlex.split` with no shell, so
+  # `$(...)` would otherwise reach pytest as a literal argument.
+  test: "bash -c 'exec \"$(git rev-parse --git-common-dir)/../.venv/bin/pytest\" -q'"
+  lint: "bash -c 'R=\"$(git rev-parse --git-common-dir)/../.venv/bin/ruff\"; \"$R\" check . && \"$R\" format --check .'"
 labels:
   ready: agent-ready
   health: code-health
