@@ -24,8 +24,8 @@ strutil = "src.cli.main:app"
 # Adding a subpackage under src/ means adding it twice here. That is the cost
 # of the dual namespace, and it is a real one.
 packages = [
-    "src", "src.api", "src.api.routes",
-    "strutil", "strutil.api", "strutil.api.routes",
+    "src", "src.api", "src.api.routes", "src.cli",
+    "strutil", "strutil.api", "strutil.api.routes", "strutil.cli",
 ]
 
 [tool.setuptools.package-dir]
@@ -33,6 +33,6 @@ strutil = "src"
 # `strutil` is aliased to the `src` directory (not discovered via find(),
 # which never consults package-dir) so the same files resolve under both the
 # existing `src.*` names and the top-level `strutil` name. Editable installs
-# redirect imports by directory, so nested modules added under `src/` later
-# (e.g. `src/cli`) resolve automatically as both `src.cli` and `strutil.cli`
-# without further edits here.
+# redirect imports by directory, so nested modules added under `src/` resolve
+# automatically as both `src.*` and `strutil.*` there -- but a non-editable
+# install still needs each one listed in `packages` above.
