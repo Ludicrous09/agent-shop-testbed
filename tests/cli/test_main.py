@@ -54,8 +54,17 @@ def test_help_exits_zero_and_shows_help_text():
     assert app.info.help in result.stdout
 
 
-def test_no_subcommands_are_registered():
-    assert app.registered_commands == []
+def test_expected_subcommands_are_registered():
+    registered_names = {command.name for command in app.registered_commands}
+    assert registered_names == {
+        "reverse",
+        "is-palindrome",
+        "word-count",
+        "truncate",
+        "parse-config",
+        "slugify",
+        "title-case",
+    }
     assert app.registered_groups == []
 
 
