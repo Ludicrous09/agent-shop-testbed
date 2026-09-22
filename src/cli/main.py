@@ -60,3 +60,6 @@ def _root(
         except ValueError as exc:
             diagnostic(str(exc))
             raise typer.Exit(EXIT_FAILURE) from exc
+
+
+from . import commands  # noqa: E402,F401 registers subcommands on ``app``
