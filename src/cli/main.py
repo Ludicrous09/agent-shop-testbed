@@ -21,7 +21,12 @@ app = typer.Typer(
 
 
 class _Simulate(enum.StrEnum):
-    """Values for the hidden ``--_simulate`` flag, used only by exit-code tests."""
+    """Values for the hidden ``--_simulate`` flag, used only by exit-code tests.
+
+    TODO: remove ``--_simulate`` and this enum once a real subcommand exists
+    to exercise the operational-failure exit path; until then it is reachable
+    (though undocumented) by any caller, not just the test suite.
+    """
 
     none = "none"
     operational_error = "operational-error"

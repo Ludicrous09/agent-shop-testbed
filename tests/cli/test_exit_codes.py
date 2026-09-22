@@ -28,10 +28,18 @@ def _isolated_cwd_and_home(tmp_path, monkeypatch):
             monkeypatch.delenv(key, raising=False)
 
 
-def test_successful_invocation_exits_zero():
+def test_help_exits_zero():
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == EXIT_SUCCESS
+
+
+def test_successful_invocation_exits_zero():
+    result = runner.invoke(app, ["--_simulate", "none"])
+
+    assert result.exit_code == EXIT_SUCCESS
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_operational_failure_exits_one_with_message_on_stderr_and_empty_stdout():
