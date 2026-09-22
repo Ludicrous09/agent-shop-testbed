@@ -69,10 +69,16 @@ def truncate_command(
         raise typer.Exit(EXIT_USAGE)
     resolved_suffix = resolve("suffix", flag=suffix, config=config, default="...")
 
+    try:
+        parsed_max_length = int(resolved_max_length)
+    except ValueError:
+        diagnostic(f"truncate: invalid value for '--max-length': {resolved_max_length!r}")
+        raise typer.Exit(EXIT_USAGE) from None
+
     render(
         "truncate",
         True,
-        result=string_utils.truncate(s, int(resolved_max_length), str(resolved_suffix)),
+        result=string_utils.truncate(s, parsed_max_length, str(resolved_suffix)),
     )
 
 

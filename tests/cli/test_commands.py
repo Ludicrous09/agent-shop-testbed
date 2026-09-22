@@ -70,6 +70,26 @@ def test_truncate_without_max_length_anywhere_is_a_usage_error():
     assert result.exit_code == 2
 
 
+def test_truncate_with_non_numeric_env_max_length_is_a_usage_error(monkeypatch):
+    monkeypatch.setenv("STRUTIL_MAX_LENGTH", "abc")
+
+    result = runner.invoke(app, ["truncate", "hello world"])
+
+    assert result.stdout == ""
+    assert result.stderr != ""
+    assert result.exit_code == 2
+
+
+def test_truncate_with_non_numeric_toml_max_length_is_a_usage_error(tmp_path):
+    (tmp_path / "strutil.toml").write_text("[truncate]\nmax_length = 'abc'\n")
+
+    result = runner.invoke(app, ["truncate", "hello world"])
+
+    assert result.stdout == ""
+    assert result.stderr != ""
+    assert result.exit_code == 2
+
+
 def test_parse_config():
     text = "a=1\n# comment\nb=2\n"
     result = runner.invoke(app, ["parse-config", text])
