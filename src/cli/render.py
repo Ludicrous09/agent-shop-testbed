@@ -42,13 +42,13 @@ def render(
     """
     if format == "json":
         payload = {"command": command, "ok": ok, "result": result, "error": error}
-        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.write(json.dumps(payload, default=str) + "\n")
         return
 
     if ok:
         sys.stdout.write(f"{result}\n" if result is not None else "")
     else:
-        sys.stdout.write(f"{command}: {error}\n")
+        sys.stdout.write(f"{command}: {error or 'unknown error'}\n")
 
 
 def diagnostic(message: str) -> None:

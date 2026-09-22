@@ -53,3 +53,33 @@ def test_diagnostic_writes_only_to_stderr(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "careful: something happened" in captured.err
+
+
+def test_text_mode_success_writes_result_line(capsys):
+    render("greet", True, result="hi")
+
+    captured = capsys.readouterr()
+    assert captured.out == "hi\n"
+    assert captured.err == ""
+
+
+def test_text_mode_success_with_no_result_writes_nothing(capsys):
+    render("greet", True, result=None)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_text_mode_failure_writes_command_and_error(capsys):
+    render("greet", False, error="boom")
+
+    captured = capsys.readouterr()
+    assert captured.out == "greet: boom\n"
+
+
+def test_text_mode_failure_with_no_error_falls_back_to_unknown_error(capsys):
+    render("greet", False, error=None)
+
+    captured = capsys.readouterr()
+    assert captured.out == "greet: unknown error\n"
